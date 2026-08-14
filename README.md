@@ -41,9 +41,12 @@ const std = @import("std");
 const serpapi = @import("serpapi");
 
 pub fn main(init: std.process.Init) !void {
+    const api_key = init.environ_map.get("SERPAPI_KEY") orelse
+        return error.MissingSerpApiKey;
+
     var client = try serpapi.Client.init(init.gpa, .{
         .engine = "google",
-        .api_key = "<SERPAPI_KEY>",
+        .api_key = api_key,
     });
     defer client.deinit();
 
@@ -60,9 +63,10 @@ This example runs a search for "coffee" on Google. It returns the results as a
 
 The SerpApi key can be obtained from [serpapi.com/signup](https://serpapi.com/users/sign_up?plan=free).
 
-Environment variables are a secure, safe, and easy way to manage secrets.
-Set `export SERPAPI_KEY=<secret_serpapi_key>` in your shell and read it with
-`init.environ_map.get("SERPAPI_KEY")`.
+Environment variables are a secure, safe, and easy way to manage secrets:
+set `export SERPAPI_KEY=<secret_serpapi_key>` in your shell, and the example
+above reads it with `init.environ_map.get("SERPAPI_KEY")` — never hardcode
+the key in source code.
 
 ## Client options
 
@@ -70,7 +74,7 @@ The `serpapi.Client.init` constructor takes an allocator and an options struct:
 
 ```zig
 var client = try serpapi.Client.init(allocator, .{
-    .api_key = "secure API key",   // user secret API key
+    .api_key = api_key,            // read from the SERPAPI_KEY environment variable
     .engine = "google",            // default search engine
     .timeout = 30,                 // HTTP timeout in seconds [default: 120]
     .persistent = true,            // keep the connection open [default: true]
