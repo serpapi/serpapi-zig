@@ -2,3 +2,4 @@ zig-out/
 .zig-cache/
 zig-cache/
 .DS_Store
+serpapi_zig_*.csv
