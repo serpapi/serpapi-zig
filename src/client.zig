@@ -138,7 +138,13 @@ pub const Client = struct {
     ///
     /// Caller owns the returned slice and must free it.
     pub fn html(self: *Client, params: []const Param) ![]u8 {
-        return self.getHtml("/search", params);
+        // the backend replies with JSON unless output=html is requested
+        if (containsKey(params, "output")) return self.getHtml("/search", params);
+        const with_output = try self.allocator.alloc(Param, params.len + 1);
+        defer self.allocator.free(with_output);
+        @memcpy(with_output[0..params.len], params);
+        with_output[params.len] = .{ .key = "output", .value = "html" };
+        return self.getHtml("/search", with_output);
     }
 
     /// Get locations using the Location API.
