@@ -194,7 +194,7 @@ defer results.deinit();
 
 With `persistent = true` (the default), the client keeps the TLS connection
 to serpapi.com open between requests, which roughly doubles throughput on
-repeated searches:
+repeated searches (measure it yourself with `zig build bench`):
 
 ```zig
 for (queries) |query| {
@@ -210,6 +210,7 @@ for (queries) |query| {
 zig build test    # run unit tests (no network)
 zig build itest   # run integration tests against serpapi.com (needs SERPAPI_KEY)
 zig build oobt    # out-of-box testing: build + run the demo app (needs SERPAPI_KEY)
+zig build bench   # benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)
 zig build lint    # check formatting (zig fmt --check)
 zig build doc     # generate API documentation under zig-out/docs
 ```

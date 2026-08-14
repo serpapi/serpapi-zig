@@ -44,8 +44,22 @@ pub fn build(b: *std.Build) void {
     const oobt_step = b.step("oobt", "Run out-of-box testing demo (needs SERPAPI_KEY)");
     oobt_step.dependOn(&run_demo.step);
 
+    // Benchmark persistent vs non-persistent connections: zig build bench
+    const bench = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "serpapi", .module = mod }},
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)");
+    bench_step.dependOn(&run_bench.step);
+
     // Lint: zig build lint (checks formatting)
-    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt" }, .check = true });
+    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench" }, .check = true });
     const lint_step = b.step("lint", "Check code formatting (zig fmt --check)");
     lint_step.dependOn(&lint.step);
 
