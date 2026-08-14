@@ -47,7 +47,7 @@ test "html returns raw page" {
     const page = try client.html(&.{.{ .key = "q", .value = "coffee" }});
     defer testing.allocator.free(page);
 
-    try testing.expect(std.mem.indexOf(u8, page, "<html") != null);
+    try testing.expect(std.ascii.indexOfIgnoreCase(page, "<html") != null);
 }
 
 test "location API returns Austin locations" {
