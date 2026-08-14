@@ -4,7 +4,7 @@ Answers to the standardized review from
 `serpapi-library-tests-generator/REVIEW.md`, for `serpapi-zig` 1.0.0.
 
 ## Q1. Have you saved all your work on GitHub? What is the branch name and tag?
-[claude 2026-08-13] No — all work is committed locally on branch `master`, tag `v1.0.0`, with the remote set to https://github.com/serpapi/serpapi-zig. Pushing requires the repository to exist under the serpapi org and push credentials; awaiting owner action.
+[claude 2026-08-14] Yes — published at https://github.com/serpapi/serpapi-zig, branch `master`, tag `v1.0.0` with a GitHub release: https://github.com/serpapi/serpapi-zig/releases/tag/v1.0.0
 
 ## Q2. Have you implemented all four endpoints: `search`, `archive`, `location`, and `account`?
 [claude 2026-08-13] Yes — `search`, `searchArchive` (+ `searchArchiveHtml`), `location`, `account`, plus the raw-HTML `html` decoder, in [src/client.zig](src/client.zig). All mirror serpapi-ruby semantics (default param merging, error payload reporting).
@@ -25,7 +25,7 @@ Answers to the standardized review from
 [claude 2026-08-13] Yes — `zig fmt` (the community-standard formatter) is enforced via `zig build lint` locally and in CI; the tree passes with zero diagnostics.
 
 ## Q8. Is the GitHub Actions workflow passing? Have you added a badge to the `README.md` file?
-[claude 2026-08-13] Yes/pending — [.github/workflows/ci.yml](.github/workflows/ci.yml) runs lint, build, unit tests on Linux/macOS/Windows and integration tests on Linux; the badge is at the top of [README.md](README.md). It cannot show green until the repo is pushed; every step passes locally.
+[claude 2026-08-14] Yes — [.github/workflows/ci.yml](.github/workflows/ci.yml) is green on Linux/macOS/Windows, including 8/8 live integration tests via the org `SERPAPI_KEY` secret: https://github.com/serpapi/serpapi-zig/actions. The badge is at the top of [README.md](README.md).
 
 ## Q9. Do you understand the process for releasing the library?
 [claude 2026-08-13] Yes — Zig has no central package registry: releasing = push to GitHub + annotated tag (`v1.0.0` created). Consumers install with `zig fetch --save git+https://github.com/serpapi/serpapi-zig`.
