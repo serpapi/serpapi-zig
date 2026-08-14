@@ -168,6 +168,24 @@ Other errors: `error.HttpRequestFailed` (non-200 status without an error
 payload), `error.JsonParseError` (response was not valid JSON), plus any
 network / TLS / allocation errors propagated from the standard library.
 
+## Search asynchronous
+
+Pass `async=true` to submit a search without blocking on the result, then
+fetch it later from the Search Archive API:
+
+```zig
+var submitted = try client.search(&.{
+    .{ .key = "q", .value = "coffee" },
+    .{ .key = "async", .value = "true" },
+});
+defer submitted.deinit();
+const search_id = submitted.value.object.get("search_metadata").?.object.get("id").?.string;
+
+// ... later: poll until search_metadata.status is "Success"
+var results = try client.searchArchive(search_id);
+defer results.deinit();
+```
+
 ## Search at scale
 
 With `persistent = true` (the default), the client keeps the TLS connection
