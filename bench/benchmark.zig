@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
         var query_buffer: [32]u8 = undefined;
         for (0..n) |i| {
             const query = try std.fmt.bufPrint(&query_buffer, "coffee {d}", .{if (persistent) n + i else i});
-            var result = try client.search(&.{.{ .key = "q", .value = query }});
+            var result = try client.search(.{ .q = query });
             result.deinit();
         }
         const elapsed_ns = std.Io.Clock.now(.awake, init.io).nanoseconds - started.nanoseconds;

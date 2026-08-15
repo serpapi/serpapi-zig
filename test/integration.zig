@@ -1,14 +1,14 @@
 //! Integration tests against the live serpapi.com backend.
 //!
 //! These mirror the serpapi-ruby spec suite:
-//!  * search API (JSON + HTML decoders)
-//!  * location API
+//!  * search API (JSON + HTML decoders, dynamic and typed)
+//!  * location API (persistent and non-persistent connections)
 //!  * account API
 //!  * search archive API
 //!  * error reporting on invalid input
 //!
-//! They require the SERPAPI_KEY environment variable and are skipped
-//! otherwise (e.g. `SERPAPI_KEY=secret zig build itest`).
+//! Tests that need an API key read the SERPAPI_KEY environment variable
+//! and are skipped otherwise (e.g. `SERPAPI_KEY=secret zig build itest`).
 
 const std = @import("std");
 const serpapi = @import("serpapi");
@@ -25,9 +25,9 @@ test "search returns coffee results from google" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
     defer client.deinit();
 
-    var result = try client.search(&.{
-        .{ .key = "q", .value = "coffee" },
-        .{ .key = "location", .value = "Austin, TX, Texas, United States" },
+    var result = try client.search(.{
+        .q = "coffee",
+        .location = "Austin, TX, Texas, United States",
     });
     defer result.deinit();
 
@@ -37,6 +37,27 @@ test "search returns coffee results from google" {
     try testing.expect(organic.items.len > 1);
 }
 
+test "searchAs decodes into a typed struct" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
+    defer client.deinit();
+
+    const Answer = struct {
+        search_metadata: struct {
+            id: []const u8,
+            status: []const u8,
+        },
+    };
+
+    var result = try client.searchAs(Answer, .{ .q = "coffee" });
+    defer result.deinit();
+
+    try testing.expectEqualStrings("Success", result.value.search_metadata.status);
+    try testing.expect(result.value.search_metadata.id.len > 0);
+}
+
 test "html returns raw page" {
     const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
     defer testing.allocator.free(key);
@@ -44,7 +65,7 @@ test "html returns raw page" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
     defer client.deinit();
 
-    const page = try client.html(&.{.{ .key = "q", .value = "coffee" }});
+    const page = try client.html(.{ .q = "coffee" });
     defer testing.allocator.free(page);
 
     try testing.expect(std.ascii.indexOfIgnoreCase(page, "<html") != null);
@@ -54,16 +75,27 @@ test "location API returns Austin locations" {
     var client = try serpapi.Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    var result = try client.location(&.{
-        .{ .key = "q", .value = "Austin" },
-        .{ .key = "limit", .value = "3" },
-    });
+    var result = try client.location(.{ .q = "Austin", .limit = 3 });
     defer result.deinit();
 
     const locations = result.value.array;
     try testing.expect(locations.items.len > 0);
     const first = locations.items[0].object;
     try testing.expect(std.mem.startsWith(u8, first.get("name").?.string, "Austin"));
+}
+
+test "location API works without persistent connection" {
+    var client = try serpapi.Client.init(testing.allocator, .{ .persistent = false });
+    defer client.deinit();
+
+    try testing.expect(!client.persistent);
+
+    // two sequential requests, each on a fresh connection
+    inline for (.{ "Austin", "Dallas" }) |city| {
+        var result = try client.location(.{ .q = city, .limit = 3 });
+        defer result.deinit();
+        try testing.expect(result.value.array.items.len > 0);
+    }
 }
 
 test "account API returns account info" {
@@ -73,7 +105,7 @@ test "account API returns account info" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key });
     defer client.deinit();
 
-    var result = try client.account(null);
+    var result = try client.account(.{});
     defer result.deinit();
 
     try testing.expect(result.value.object.get("account_id") != null);
@@ -87,7 +119,7 @@ test "search archive returns a past search" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
     defer client.deinit();
 
-    var original = try client.search(&.{.{ .key = "q", .value = "coffee" }});
+    var original = try client.search(.{ .q = "coffee" });
     defer original.deinit();
     const search_id = original.value.object.get("search_metadata").?.object.get("id").?.string;
 
@@ -102,7 +134,7 @@ test "invalid api key reports a serpapi error" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_key", .engine = "google" });
     defer client.deinit();
 
-    const result = client.search(&.{.{ .key = "q", .value = "coffee" }});
+    const result = client.search(.{ .q = "coffee" });
     try testing.expectError(serpapi.client.Error.SerpApiError, result);
     try testing.expect(client.errorMessage() != null);
 }
@@ -114,9 +146,10 @@ test "missing query reports a serpapi error" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
     defer client.deinit();
 
-    const result = client.search(&.{});
+    const result = client.search(.{});
     try testing.expectError(serpapi.client.Error.SerpApiError, result);
-    try testing.expect(client.errorMessage() != null);
+    const message = client.errorMessage().?;
+    try testing.expect(std.ascii.indexOfIgnoreCase(message, "missing query") != null);
 }
 
 test "persistent connection performs multiple searches" {
@@ -131,7 +164,7 @@ test "persistent connection performs multiple searches" {
     defer client.deinit();
 
     inline for (.{ "coffee", "tea" }) |query| {
-        var result = try client.search(&.{.{ .key = "q", .value = query }});
+        var result = try client.search(.{ .q = query });
         defer result.deinit();
         try testing.expect(result.value.object.get("organic_results") != null);
     }

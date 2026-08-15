@@ -19,9 +19,9 @@ pub fn main(init: std.process.Init) !void {
     var client = try serpapi.Client.init(allocator, .{ .api_key = key, .engine = "google" });
     defer client.deinit();
 
-    var result = client.search(&.{
-        .{ .key = "q", .value = "coffee" },
-        .{ .key = "location", .value = "Austin, TX, Texas, United States" },
+    var result = client.search(.{
+        .q = "coffee",
+        .location = "Austin, TX, Texas, United States",
     }) catch |err| {
         std.debug.print("search failed: {t} ({s})\n", .{ err, client.errorMessage() orelse "no details" });
         std.process.exit(1);

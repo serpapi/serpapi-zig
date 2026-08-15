@@ -16,7 +16,9 @@ pub const version = "1.0.0";
 /// Backend service host.
 pub const backend = "serpapi.com";
 
-/// A single query parameter (key/value pair), e.g. `.{ .key = "q", .value = "coffee" }`.
+/// A single query parameter (key/value pair) as stored internally for the
+/// client defaults. Public APIs take anonymous structs instead, e.g.
+/// `.{ .q = "coffee", .limit = 3 }`.
 pub const Param = struct {
     key: []const u8,
     value: []const u8,
@@ -35,6 +37,10 @@ pub const Error = error{
 
 /// Client for SerpApi.com.
 ///
+/// Query parameters are plain anonymous structs, the same shape
+/// `std.json.stringify` accepts: field names are parameter names, values
+/// may be strings, integers, floats, or booleans.
+///
 /// ```zig
 /// const serpapi = @import("serpapi");
 ///
@@ -44,7 +50,7 @@ pub const Error = error{
 /// });
 /// defer client.deinit();
 ///
-/// var result = try client.search(&.{.{ .key = "q", .value = "coffee" }});
+/// var result = try client.search(.{ .q = "coffee" });
 /// defer result.deinit();
 /// ```
 pub const Client = struct {
@@ -61,26 +67,29 @@ pub const Client = struct {
     /// Last error payload returned by serpapi.com (owned), see `errorMessage`.
     last_error: ?[]u8 = null,
 
-    /// Constructor options. All fields are optional.
-    pub const Options = struct {
-        /// User secret API key.
-        api_key: ?[]const u8 = null,
-        /// Search engine selected, e.g. "google".
-        engine: ?[]const u8 = null,
-        /// HTTP request max timeout in seconds [default: 120s == 2m].
-        timeout: u32 = 120,
-        /// Keep socket connection open to save on SSL handshake /
-        /// connection reconnection (2x faster). [default: true]
-        persistent: bool = true,
-        /// Additional default parameters applied to every search.
-        params: []const Param = &.{},
-    };
-
-    const Decoder = enum { json, html };
+    /// Configuration-only option names; every other `init` field becomes a
+    /// default query parameter, mirroring serpapi-ruby's constructor hash.
+    const config_options = [_][]const u8{ "timeout", "persistent" };
 
     /// Create a client. The returned pointer is heap-allocated and must be
     /// released with `deinit`.
-    pub fn init(allocator: Allocator, options: Options) !*Client {
+    ///
+    /// `options` is an anonymous struct. Two fields configure the client:
+    ///  * `timeout`: HTTP request max timeout in seconds [default: 120s == 2m]
+    ///  * `persistent`: keep the socket open to save on SSL handshake /
+    ///    reconnection (2x faster) [default: true]
+    ///
+    /// Every other field (`api_key`, `engine`, `gl`, ...) becomes a default
+    /// query parameter applied to every request:
+    ///
+    /// ```zig
+    /// var client = try serpapi.Client.init(allocator, .{
+    ///     .api_key = key,
+    ///     .engine = "google",
+    ///     .timeout = 30,
+    /// });
+    /// ```
+    pub fn init(allocator: Allocator, options: anytype) !*Client {
         const self = try allocator.create(Client);
         errdefer allocator.destroy(self);
 
@@ -89,18 +98,15 @@ pub const Client = struct {
             .threaded = .init(allocator, .{}),
             .http = undefined,
             .params = .init(allocator),
-            .timeout = options.timeout,
-            .persistent = options.persistent,
+            .timeout = if (@hasField(@TypeOf(options), "timeout")) options.timeout else 120,
+            .persistent = if (@hasField(@TypeOf(options), "persistent")) options.persistent else true,
         };
         self.http = .{ .allocator = allocator, .io = self.threaded.io() };
         errdefer self.freeParams();
 
-        if (options.api_key) |key| try self.addParam("api_key", key);
-        if (options.engine) |engine_id| try self.addParam("engine", engine_id);
-        for (options.params) |extra| {
-            if (std.mem.eql(u8, extra.key, "api_key") and options.api_key != null) continue;
-            if (std.mem.eql(u8, extra.key, "engine") and options.engine != null) continue;
-            try self.addParam(extra.key, extra.value);
+        inline for (@typeInfo(@TypeOf(options)).@"struct".fields) |field| {
+            if (comptime isConfigOption(field.name)) continue;
+            try self.addParamValue(field.name, @field(options, field.name));
         }
         // track the zig library as a client for statistic purpose
         try self.addParam("source", "serpapi-zig:" ++ version);
@@ -118,7 +124,8 @@ pub const Client = struct {
         allocator.destroy(self);
     }
 
-    /// Perform a search using SerpApi.com and decode the JSON payload.
+    /// Perform a search using SerpApi.com and decode the JSON payload into
+    /// a dynamic `std.json.Value` tree. For typed decoding see `searchAs`.
     ///
     /// Note that the raw response from the search engine is converted to JSON
     /// by the SerpApi.com backend; most of the compute is on the backend, not
@@ -126,10 +133,26 @@ pub const Client = struct {
     ///
     /// see: https://serpapi.com/search-api
     ///
-    /// `params` override the defaults provided to the constructor.
+    /// `params` override the defaults provided to the constructor:
+    /// `client.search(.{ .q = "coffee", .location = "Austin, TX" })`.
     /// Caller owns the result and must call `deinit` on it.
-    pub fn search(self: *Client, params: []const Param) !std.json.Parsed(std.json.Value) {
-        return self.getJson("/search", params);
+    pub fn search(self: *Client, params: anytype) !std.json.Parsed(std.json.Value) {
+        return self.searchAs(std.json.Value, params);
+    }
+
+    /// Same as `search` but decodes the payload into `T`, following
+    /// `std.json.parseFromSlice`. Unknown JSON fields are ignored, so `T`
+    /// only needs to declare the fields you care about:
+    ///
+    /// ```zig
+    /// const Answer = struct {
+    ///     search_metadata: struct { id: []const u8, status: []const u8 },
+    /// };
+    /// var result = try client.searchAs(Answer, .{ .q = "coffee" });
+    /// defer result.deinit();
+    /// ```
+    pub fn searchAs(self: *Client, comptime T: type, params: anytype) !std.json.Parsed(T) {
+        return self.getJson(T, "/search", params, &.{});
     }
 
     /// Perform a search using SerpApi.com and return the raw HTML from the
@@ -137,36 +160,48 @@ pub const Client = struct {
     /// you need to parse the HTML yourself.
     ///
     /// Caller owns the returned slice and must free it.
-    pub fn html(self: *Client, params: []const Param) ![]u8 {
+    pub fn html(self: *Client, params: anytype) ![]u8 {
         // the backend replies with JSON unless output=html is requested
-        if (containsKey(params, "output")) return self.getHtml("/search", params);
-        const with_output = try self.allocator.alloc(Param, params.len + 1);
-        defer self.allocator.free(with_output);
-        @memcpy(with_output[0..params.len], params);
-        with_output[params.len] = .{ .key = "output", .value = "html" };
-        return self.getHtml("/search", with_output);
+        const extra: []const Param = if (@hasField(@TypeOf(params), "output"))
+            &.{}
+        else
+            &.{.{ .key = "output", .value = "html" }};
+        return self.getHtml("/search", params, extra);
     }
 
-    /// Get locations using the Location API.
+    /// Get locations using the Location API, as a dynamic JSON tree.
+    /// For typed decoding see `locationAs`.
     ///
     /// doc: https://serpapi.com/locations-api
     ///
-    /// `params` should include the fields: q, limit.
+    /// `params` should include the fields q and limit:
+    /// `client.location(.{ .q = "Austin", .limit = 3 })`.
     /// Caller owns the result and must call `deinit` on it.
-    pub fn location(self: *Client, params: []const Param) !std.json.Parsed(std.json.Value) {
-        return self.getJson("/locations.json", params);
+    pub fn location(self: *Client, params: anytype) !std.json.Parsed(std.json.Value) {
+        return self.locationAs(std.json.Value, params);
     }
 
-    /// Retrieve a search result from the Search Archive API as JSON.
+    /// Same as `location` but decodes the payload into `T`.
+    pub fn locationAs(self: *Client, comptime T: type, params: anytype) !std.json.Parsed(T) {
+        return self.getJson(T, "/locations.json", params, &.{});
+    }
+
+    /// Retrieve a search result from the Search Archive API as a dynamic
+    /// JSON tree. For typed decoding see `searchArchiveAs`.
     ///
     /// `search_id` comes from an earlier search: `result.search_metadata.id`.
     /// doc: https://serpapi.com/search-archive-api
     ///
     /// Caller owns the result and must call `deinit` on it.
     pub fn searchArchive(self: *Client, search_id: []const u8) !std.json.Parsed(std.json.Value) {
+        return self.searchArchiveAs(std.json.Value, search_id);
+    }
+
+    /// Same as `searchArchive` but decodes the payload into `T`.
+    pub fn searchArchiveAs(self: *Client, comptime T: type, search_id: []const u8) !std.json.Parsed(T) {
         const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.json", .{search_id});
         defer self.allocator.free(endpoint);
-        return self.getJson(endpoint, &.{});
+        return self.getJson(T, endpoint, .{}, &.{});
     }
 
     /// Retrieve a search result from the Search Archive API as raw HTML.
@@ -175,20 +210,24 @@ pub const Client = struct {
     pub fn searchArchiveHtml(self: *Client, search_id: []const u8) ![]u8 {
         const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.html", .{search_id});
         defer self.allocator.free(endpoint);
-        return self.getHtml(endpoint, &.{});
+        return self.getHtml(endpoint, .{}, &.{});
     }
 
-    /// Get account information using the Account API.
+    /// Get account information using the Account API, as a dynamic JSON
+    /// tree. For typed decoding see `accountAs`.
     ///
     /// doc: https://serpapi.com/account-api
     ///
-    /// `api_key` is optional if already provided to the constructor.
+    /// Pass `.{}` when the api_key was provided to the constructor, or
+    /// override it: `client.account(.{ .api_key = "other key" })`.
     /// Caller owns the result and must call `deinit` on it.
-    pub fn account(self: *Client, api_key: ?[]const u8) !std.json.Parsed(std.json.Value) {
-        if (api_key) |key| {
-            return self.getJson("/account", &.{.{ .key = "api_key", .value = key }});
-        }
-        return self.getJson("/account", &.{});
+    pub fn account(self: *Client, params: anytype) !std.json.Parsed(std.json.Value) {
+        return self.accountAs(std.json.Value, params);
+    }
+
+    /// Same as `account` but decodes the payload into `T`.
+    pub fn accountAs(self: *Client, comptime T: type, params: anytype) !std.json.Parsed(T) {
+        return self.getJson(T, "/account", params, &.{});
     }
 
     /// Default search engine as provided to the constructor, if any.
@@ -213,6 +252,42 @@ pub const Client = struct {
         return null;
     }
 
+    fn isConfigOption(comptime name: []const u8) bool {
+        for (config_options) |option| {
+            if (std.mem.eql(u8, option, name)) return true;
+        }
+        return false;
+    }
+
+    fn isString(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => ptr.child == u8,
+                .one => switch (@typeInfo(ptr.child)) {
+                    .array => |arr| arr.child == u8,
+                    else => false,
+                },
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// Store a default parameter, stringifying non-string values.
+    fn addParamValue(self: *Client, key: []const u8, value: anytype) !void {
+        const T = @TypeOf(value);
+        if (comptime isString(T)) return self.addParam(key, value);
+        switch (@typeInfo(T)) {
+            .bool => try self.addParam(key, if (value) "true" else "false"),
+            .int, .comptime_int, .float, .comptime_float => {
+                const text = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+                defer self.allocator.free(text);
+                try self.addParam(key, text);
+            },
+            else => @compileError("unsupported parameter type: " ++ @typeName(T)),
+        }
+    }
+
     fn addParam(self: *Client, key: []const u8, value: []const u8) !void {
         const key_copy = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(key_copy);
@@ -235,9 +310,23 @@ pub const Client = struct {
         self.last_error = copy;
     }
 
+    /// Write one query parameter value, percent-encoding strings and
+    /// stringifying integers, floats, and booleans.
+    fn writeValue(w: *std.Io.Writer, value: anytype) !void {
+        const T = @TypeOf(value);
+        if (comptime isString(T)) {
+            return std.Uri.Component.percentEncode(w, value, isUrlSafe);
+        }
+        switch (@typeInfo(T)) {
+            .bool => try w.writeAll(if (value) "true" else "false"),
+            .int, .comptime_int, .float, .comptime_float => try w.print("{d}", .{value}),
+            else => @compileError("unsupported parameter type: " ++ @typeName(T)),
+        }
+    }
+
     /// Build the full request URL: https://serpapi.com<endpoint>?<query>.
-    /// Call `params` take precedence over constructor defaults.
-    fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: []const Param) ![]u8 {
+    /// Precedence: call `params`, then `extra`, then constructor defaults.
+    fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param) ![]u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
         const w = &out.writer;
@@ -245,7 +334,15 @@ pub const Client = struct {
         try w.print("https://{s}{s}", .{ backend, endpoint });
 
         var separator: u8 = '?';
-        for (params) |item| {
+        inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |field| {
+            try w.writeByte(separator);
+            separator = '&';
+            try std.Uri.Component.percentEncode(w, field.name, isUrlSafe);
+            try w.writeByte('=');
+            try writeValue(w, @field(params, field.name));
+        }
+        for (extra) |item| {
+            if (hasParam(params, item.key)) continue;
             try w.writeByte(separator);
             separator = '&';
             try std.Uri.Component.percentEncode(w, item.key, isUrlSafe);
@@ -253,7 +350,7 @@ pub const Client = struct {
             try std.Uri.Component.percentEncode(w, item.value, isUrlSafe);
         }
         for (self.params.items) |item| {
-            if (containsKey(params, item.key)) continue;
+            if (hasParam(params, item.key) or containsKey(extra, item.key)) continue;
             try w.writeByte(separator);
             separator = '&';
             try std.Uri.Component.percentEncode(w, item.key, isUrlSafe);
@@ -264,8 +361,15 @@ pub const Client = struct {
         return out.toOwnedSlice();
     }
 
-    fn containsKey(params: []const Param, key: []const u8) bool {
-        for (params) |item| {
+    fn hasParam(params: anytype, key: []const u8) bool {
+        inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, key)) return true;
+        }
+        return false;
+    }
+
+    fn containsKey(items: []const Param, key: []const u8) bool {
+        for (items) |item| {
             if (std.mem.eql(u8, item.key, key)) return true;
         }
         return false;
@@ -281,8 +385,8 @@ pub const Client = struct {
 
     /// Perform an HTTP GET request against the backend and return the raw
     /// body (caller owns) along with the HTTP status.
-    fn get(self: *Client, endpoint: []const u8, params: []const Param) !struct { body: []u8, status: std.http.Status } {
-        const url = try self.buildUrl(self.allocator, endpoint, params);
+    fn get(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) !struct { body: []u8, status: std.http.Status } {
+        const url = try self.buildUrl(self.allocator, endpoint, params, extra);
         defer self.allocator.free(url);
 
         var body: std.Io.Writer.Allocating = .init(self.allocator);
@@ -297,40 +401,57 @@ pub const Client = struct {
         return .{ .body = try body.toOwnedSlice(), .status = result.status };
     }
 
-    fn getJson(self: *Client, endpoint: []const u8, params: []const Param) !std.json.Parsed(std.json.Value) {
-        const response = try self.get(endpoint, params);
+    fn getJson(self: *Client, comptime T: type, endpoint: []const u8, params: anytype, extra: []const Param) !std.json.Parsed(T) {
+        const response = try self.get(endpoint, params, extra);
         defer self.allocator.free(response.body);
 
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, response.body, .{
+        // serpapi.com reports failures as an `error` field in the payload.
+        if (response.status != .ok) {
+            try self.captureError(response.body, @tagName(response.status));
+            return Error.SerpApiError;
+        }
+
+        const parsed = std.json.parseFromSlice(T, self.allocator, response.body, .{
             .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
         }) catch {
             try self.setLastError(response.body);
             return Error.JsonParseError;
         };
         errdefer parsed.deinit();
 
-        // serpapi.com reports failures as an `error` field in the payload.
-        if (parsed.value == .object) {
-            if (parsed.value.object.get("error")) |error_value| {
-                if (error_value == .string) {
-                    try self.setLastError(error_value.string);
-                    return Error.SerpApiError;
-                }
+        if (T == std.json.Value) {
+            if (errorField(parsed.value)) |message| {
+                try self.setLastError(message);
+                return Error.SerpApiError;
             }
-        }
-        if (response.status != .ok) {
-            try self.setLastError(@tagName(response.status));
-            return Error.HttpRequestFailed;
         }
         return parsed;
     }
 
-    fn getHtml(self: *Client, endpoint: []const u8, params: []const Param) ![]u8 {
-        const response = try self.get(endpoint, params);
+    /// Extract the backend `error` message from an error payload; fall back
+    /// to the given default (typically the HTTP status name).
+    fn captureError(self: *Client, body: []const u8, fallback: []const u8) !void {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
+            return self.setLastError(if (body.len > 0) body else fallback);
+        };
+        defer parsed.deinit();
+        try self.setLastError(errorField(parsed.value) orelse fallback);
+    }
+
+    fn errorField(value: std.json.Value) ?[]const u8 {
+        if (value != .object) return null;
+        const error_value = value.object.get("error") orelse return null;
+        if (error_value != .string) return null;
+        return error_value.string;
+    }
+
+    fn getHtml(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) ![]u8 {
+        const response = try self.get(endpoint, params, extra);
         errdefer self.allocator.free(response.body);
 
         if (response.status != .ok) {
-            try self.setLastError(response.body);
+            try self.captureError(response.body, @tagName(response.status));
             self.allocator.free(response.body);
             return Error.HttpRequestFailed;
         }
@@ -361,7 +482,7 @@ test "constructor options" {
         .engine = "google",
         .timeout = 30,
         .persistent = false,
-        .params = &.{.{ .key = "gl", .value = "us" }},
+        .gl = "us",
     });
     defer client.deinit();
 
@@ -370,15 +491,27 @@ test "constructor options" {
     try testing.expectEqualStrings("google", client.engine().?);
     try testing.expectEqualStrings("secret", client.apiKey().?);
     try testing.expectEqualStrings("us", client.param("gl").?);
+    // configuration-only options must not leak into query parameters
+    try testing.expectEqual(@as(?[]const u8, null), client.param("timeout"));
+    try testing.expectEqual(@as(?[]const u8, null), client.param("persistent"));
+}
+
+test "constructor stringifies non-string defaults" {
+    var client = try Client.init(testing.allocator, .{
+        .limit = 3,
+        .no_cache = true,
+    });
+    defer client.deinit();
+
+    try testing.expectEqualStrings("3", client.param("limit").?);
+    try testing.expectEqualStrings("true", client.param("no_cache").?);
 }
 
 test "buildUrl merges defaults with call parameters" {
     var client = try Client.init(testing.allocator, .{ .api_key = "secret", .engine = "google" });
     defer client.deinit();
 
-    const url = try client.buildUrl(testing.allocator, "/search", &.{
-        .{ .key = "q", .value = "coffee" },
-    });
+    const url = try client.buildUrl(testing.allocator, "/search", .{ .q = "coffee" }, &.{});
     defer testing.allocator.free(url);
 
     try testing.expectEqualStrings(
@@ -391,9 +524,7 @@ test "buildUrl call parameters override defaults" {
     var client = try Client.init(testing.allocator, .{ .engine = "google" });
     defer client.deinit();
 
-    const url = try client.buildUrl(testing.allocator, "/search", &.{
-        .{ .key = "engine", .value = "bing" },
-    });
+    const url = try client.buildUrl(testing.allocator, "/search", .{ .engine = "bing" }, &.{});
     defer testing.allocator.free(url);
 
     try testing.expectEqualStrings(
@@ -402,13 +533,28 @@ test "buildUrl call parameters override defaults" {
     );
 }
 
+test "buildUrl stringifies numbers and booleans" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const url = try client.buildUrl(testing.allocator, "/locations.json", .{
+        .q = "Austin",
+        .limit = 3,
+        .no_cache = true,
+    }, &.{});
+    defer testing.allocator.free(url);
+
+    try testing.expectEqualStrings(
+        "https://serpapi.com/locations.json?q=Austin&limit=3&no_cache=true&source=serpapi-zig%3A" ++ version,
+        url,
+    );
+}
+
 test "buildUrl percent-encodes reserved characters" {
     var client = try Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    const url = try client.buildUrl(testing.allocator, "/search", &.{
-        .{ .key = "q", .value = "fresh coffee & tea=100%" },
-    });
+    const url = try client.buildUrl(testing.allocator, "/search", .{ .q = "fresh coffee & tea=100%" }, &.{});
     defer testing.allocator.free(url);
 
     try testing.expectEqualStrings(
@@ -417,21 +563,25 @@ test "buildUrl percent-encodes reserved characters" {
     );
 }
 
-test "constructor extra params do not duplicate api_key or engine" {
-    var client = try Client.init(testing.allocator, .{
-        .api_key = "secret",
-        .engine = "google",
-        .params = &.{
-            .{ .key = "api_key", .value = "ignored" },
-            .{ .key = "engine", .value = "ignored" },
-            .{ .key = "hl", .value = "en" },
-        },
-    });
+test "buildUrl extra parameters yield to call parameters" {
+    var client = try Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    try testing.expectEqualStrings("secret", client.apiKey().?);
-    try testing.expectEqualStrings("google", client.engine().?);
-    try testing.expectEqualStrings("en", client.param("hl").?);
+    const extra: []const Param = &.{.{ .key = "output", .value = "html" }};
+
+    const url = try client.buildUrl(testing.allocator, "/search", .{ .q = "coffee" }, extra);
+    defer testing.allocator.free(url);
+    try testing.expectEqualStrings(
+        "https://serpapi.com/search?q=coffee&output=html&source=serpapi-zig%3A" ++ version,
+        url,
+    );
+
+    const override = try client.buildUrl(testing.allocator, "/search", .{ .q = "coffee", .output = "json" }, extra);
+    defer testing.allocator.free(override);
+    try testing.expectEqualStrings(
+        "https://serpapi.com/search?q=coffee&output=json&source=serpapi-zig%3A" ++ version,
+        override,
+    );
 }
 
 test "setLastError replaces previous error" {
@@ -443,4 +593,18 @@ test "setLastError replaces previous error" {
     try testing.expectEqualStrings("first", client.errorMessage().?);
     try client.setLastError("second");
     try testing.expectEqualStrings("second", client.errorMessage().?);
+}
+
+test "captureError extracts the backend error field" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try client.captureError("{\"error\":\"Missing query `q` parameter.\"}", "bad_request");
+    try testing.expectEqualStrings("Missing query `q` parameter.", client.errorMessage().?);
+
+    try client.captureError("not json at all", "bad_request");
+    try testing.expectEqualStrings("not json at all", client.errorMessage().?);
+
+    try client.captureError("", "bad_request");
+    try testing.expectEqualStrings("bad_request", client.errorMessage().?);
 }

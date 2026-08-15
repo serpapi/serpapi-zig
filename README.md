@@ -2,6 +2,10 @@
 
 [![serpapi-zig](https://github.com/serpapi/serpapi-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/serpapi/serpapi-zig/actions/workflows/ci.yml)
 
+> [!WARNING]
+> This library is under heavy development and is **not production ready**.
+> The API may change without notice between releases.
+
 Integrate search data into your AI workflow, RAG / fine-tuning, or Zig application using this wrapper for [SerpApi](https://serpapi.com).
 
 SerpApi supports Google, Google Maps, Google Shopping, Baidu, Yandex, Yahoo, eBay, App Stores, and [more](https://serpapi.com).
@@ -36,6 +40,9 @@ exe.root_module.addImport("serpapi", serpapi.module("serpapi"));
 
 ## Simple Usage
 
+Query parameters are plain anonymous structs — field names are parameter
+names; values may be strings, integers, floats, or booleans.
+
 ```zig
 const std = @import("std");
 const serpapi = @import("serpapi");
@@ -50,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer client.deinit();
 
-    var results = try client.search(&.{.{ .key = "q", .value = "coffee" }});
+    var results = try client.search(.{ .q = "coffee" });
     defer results.deinit();
 
     std.debug.print("{f}\n", .{std.json.fmt(results.value, .{ .whitespace = .indent_2 })});
@@ -68,41 +75,60 @@ set `export SERPAPI_KEY=<secret_serpapi_key>` in your shell, and the example
 above reads it with `init.environ_map.get("SERPAPI_KEY")` — never hardcode
 the key in source code.
 
+As everywhere in Zig, the caller owns returned resources: results from JSON
+APIs are released with `deinit()`, raw HTML slices with `allocator.free()`.
+The remaining examples omit the `defer` cleanup lines for brevity.
+
 ## Client options
 
-The `serpapi.Client.init` constructor takes an allocator and an options struct:
+The `serpapi.Client.init` constructor takes an allocator and an anonymous
+struct. `timeout` and `persistent` configure the client; every other field
+becomes a default query parameter applied to every request:
 
 ```zig
 var client = try serpapi.Client.init(allocator, .{
-    .api_key = api_key,            // read from the SERPAPI_KEY environment variable
-    .engine = "google",            // default search engine
-    .timeout = 30,                 // HTTP timeout in seconds [default: 120]
-    .persistent = true,            // keep the connection open [default: true]
-    .params = &.{                  // extra default parameters
-        .{ .key = "gl", .value = "us" },
-    },
+    .api_key = api_key,  // read from the SERPAPI_KEY environment variable
+    .engine = "google",  // default search engine
+    .gl = "us",          // any other field: default query parameter
+    .timeout = 30,       // HTTP timeout in seconds [default: 120]
+    .persistent = true,  // keep the connection open [default: true]
 });
-defer client.deinit();
 ```
 
 All fields are optional. Parameters passed to a method call override the
-defaults provided to the constructor. Call `deinit` when the client is no
-longer needed; it closes the connection and frees all resources.
+defaults provided to the constructor. Call `client.deinit()` when the client
+is no longer needed; it closes the connection and frees all resources.
 
 ## APIs
 
 ### Search API
 
 ```zig
-var results = try client.search(&.{
-    .{ .key = "q", .value = "coffee" },
-    .{ .key = "location", .value = "Austin, TX, Texas, United States" },
+var results = try client.search(.{
+    .q = "coffee",
+    .location = "Austin, TX, Texas, United States",
 });
-defer results.deinit();
 const organic = results.value.object.get("organic_results").?.array;
 ```
 
 doc: [serpapi.com/search-api](https://serpapi.com/search-api)
+
+### Search API — typed results
+
+Following `std.json.parseFromSlice`, every JSON method has an `As` variant
+that decodes into your own struct instead of a dynamic tree. Unknown JSON
+fields are ignored, so declare only what you need:
+
+```zig
+const Answer = struct {
+    search_metadata: struct { id: []const u8, status: []const u8 },
+};
+
+var results = try client.searchAs(Answer, .{ .q = "coffee" });
+std.debug.print("status: {s}\n", .{results.value.search_metadata.status});
+```
+
+Also available: `locationAs`, `searchArchiveAs`, and `accountAs`.
 
 ### Search API — raw HTML
 
@@ -111,18 +137,13 @@ training AI models, RAG, debugging, or when you need to parse the HTML
 yourself.
 
 ```zig
-const page = try client.html(&.{.{ .key = "q", .value = "coffee" }});
-defer allocator.free(page);
+const page = try client.html(.{ .q = "coffee" });
 ```
 
 ### Location API
 
 ```zig
-var locations = try client.location(&.{
-    .{ .key = "q", .value = "Austin" },
-    .{ .key = "limit", .value = "3" },
-});
-defer locations.deinit();
+var locations = try client.location(.{ .q = "Austin", .limit = 3 });
 ```
 
 doc: [serpapi.com/locations-api](https://serpapi.com/locations-api)
@@ -134,11 +155,9 @@ Retrieve a past search by id — the id comes from
 
 ```zig
 var archived = try client.searchArchive(search_id);
-defer archived.deinit();
 
 // or as raw HTML:
 const page = try client.searchArchiveHtml(search_id);
-defer allocator.free(page);
 ```
 
 doc: [serpapi.com/search-archive-api](https://serpapi.com/search-archive-api)
@@ -146,9 +165,11 @@ doc: [serpapi.com/search-archive-api](https://serpapi.com/search-archive-api)
 ### Account API
 
 ```zig
-var account = try client.account(null); // or pass an api_key
-defer account.deinit();
+var account = try client.account(.{});
 ```
+
+The api_key provided to the constructor is used; override it with
+`client.account(.{ .api_key = "other key" })`.
 
 doc: [serpapi.com/account-api](https://serpapi.com/account-api)
 
@@ -159,7 +180,7 @@ call returns `error.SerpApiError` and the backend message is available from
 `client.errorMessage()`:
 
 ```zig
-const results = client.search(&.{}) catch |err| switch (err) {
+const results = client.search(.{}) catch |err| switch (err) {
     error.SerpApiError => {
         std.debug.print("serpapi.com says: {s}\n", .{client.errorMessage().?});
         return err;
@@ -174,20 +195,15 @@ network / TLS / allocation errors propagated from the standard library.
 
 ## Search asynchronous
 
-Pass `async=true` to submit a search without blocking on the result, then
+Pass `async = true` to submit a search without blocking on the result, then
 fetch it later from the Search Archive API:
 
 ```zig
-var submitted = try client.search(&.{
-    .{ .key = "q", .value = "coffee" },
-    .{ .key = "async", .value = "true" },
-});
-defer submitted.deinit();
+var submitted = try client.search(.{ .q = "coffee", .async = true });
 const search_id = submitted.value.object.get("search_metadata").?.object.get("id").?.string;
 
 // ... later: poll until search_metadata.status is "Success"
 var results = try client.searchArchive(search_id);
-defer results.deinit();
 ```
 
 ## Search at scale
@@ -198,7 +214,7 @@ repeated searches (measure it yourself with `zig build bench`):
 
 ```zig
 for (queries) |query| {
-    var results = try client.search(&.{.{ .key = "q", .value = query }});
+    var results = try client.search(.{ .q = query });
     defer results.deinit();
     // process results...
 }
