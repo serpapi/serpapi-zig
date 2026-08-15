@@ -214,18 +214,19 @@ pub const Client = struct {
     }
 
     /// Get account information using the Account API, as a dynamic JSON
-    /// tree. For typed decoding see `accountAs`.
+    /// tree, with the api_key provided to the constructor.
     ///
     /// doc: https://serpapi.com/account-api
     ///
-    /// Pass `.{}` when the api_key was provided to the constructor, or
-    /// override it: `client.account(.{ .api_key = "other key" })`.
-    /// Caller owns the result and must call `deinit` on it.
-    pub fn account(self: *Client, params: anytype) !std.json.Parsed(std.json.Value) {
-        return self.accountAs(std.json.Value, params);
+    /// To override the api_key, or to decode into your own struct, use
+    /// `accountAs`. Caller owns the result and must call `deinit` on it.
+    pub fn account(self: *Client) !std.json.Parsed(std.json.Value) {
+        return self.accountAs(std.json.Value, .{});
     }
 
-    /// Same as `account` but decodes the payload into `T`.
+    /// Same as `account` but decodes the payload into `T` and accepts
+    /// parameters, e.g. to override the key:
+    /// `client.accountAs(std.json.Value, .{ .api_key = "other key" })`.
     pub fn accountAs(self: *Client, comptime T: type, params: anytype) !std.json.Parsed(T) {
         return self.getJson(T, "/account", params, &.{});
     }
@@ -326,11 +327,16 @@ pub const Client = struct {
 
     /// Build the full request URL: https://serpapi.com<endpoint>?<query>.
     /// Precedence: call `params`, then `extra`, then constructor defaults.
-    fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param) ![]u8 {
+    fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param) Allocator.Error![]u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
-        const w = &out.writer;
 
+        // an Allocating writer only ever fails to allocate
+        self.writeUrl(&out.writer, endpoint, params, extra) catch return error.OutOfMemory;
+        return out.toOwnedSlice();
+    }
+
+    fn writeUrl(self: *const Client, w: *std.Io.Writer, endpoint: []const u8, params: anytype, extra: []const Param) std.Io.Writer.Error!void {
         try w.print("https://{s}{s}", .{ backend, endpoint });
 
         var separator: u8 = '?';
@@ -357,8 +363,6 @@ pub const Client = struct {
             try w.writeByte('=');
             try std.Uri.Component.percentEncode(w, item.value, isUrlSafe);
         }
-
-        return out.toOwnedSlice();
     }
 
     fn hasParam(params: anytype, key: []const u8) bool {
@@ -593,6 +597,46 @@ test "setLastError replaces previous error" {
     try testing.expectEqualStrings("first", client.errorMessage().?);
     try client.setLastError("second");
     try testing.expectEqualStrings("second", client.errorMessage().?);
+}
+
+test "construction cleans up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator) !void {
+            var client = try Client.init(allocator, .{
+                .api_key = "secret",
+                .engine = "google",
+                .gl = "us",
+                .limit = 3,
+            });
+            defer client.deinit();
+        }
+    }.run, .{});
+}
+
+test "buildUrl cleans up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator) !void {
+            var client = try Client.init(testing.allocator, .{ .engine = "google" });
+            defer client.deinit();
+
+            const url = try client.buildUrl(allocator, "/search", .{ .q = "coffee & tea" }, &.{
+                .{ .key = "output", .value = "html" },
+            });
+            allocator.free(url);
+        }
+    }.run, .{});
+}
+
+test "error reporting cleans up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator) !void {
+            var client = try Client.init(allocator, .{});
+            defer client.deinit();
+
+            try client.captureError("{\"error\":\"Missing query `q` parameter.\"}", "bad_request");
+            try client.captureError("not json at all", "bad_request");
+        }
+    }.run, .{});
 }
 
 test "captureError extracts the backend error field" {

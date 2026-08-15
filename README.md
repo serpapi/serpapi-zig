@@ -165,11 +165,11 @@ doc: [serpapi.com/search-archive-api](https://serpapi.com/search-archive-api)
 ### Account API
 
 ```zig
-var account = try client.account(.{});
+var account = try client.account();
 ```
 
 The api_key provided to the constructor is used; override it with
-`client.account(.{ .api_key = "other key" })`.
+`client.accountAs(std.json.Value, .{ .api_key = "other key" })`.
 
 doc: [serpapi.com/account-api](https://serpapi.com/account-api)
 
@@ -227,9 +227,39 @@ zig build test    # run unit tests (no network)
 zig build itest   # run integration tests against serpapi.com (needs SERPAPI_KEY)
 zig build oobt    # out-of-box testing: build + run the demo app (needs SERPAPI_KEY)
 zig build bench   # benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)
+zig build cov     # measure code coverage (needs kcov + SERPAPI_KEY)
 zig build lint    # check formatting (zig fmt --check)
 zig build doc     # generate API documentation under zig-out/docs
 ```
+
+## Code coverage
+
+Coverage is measured with [kcov](https://github.com/SimonKagstrom/kcov), which
+Zig binaries support out of the box — no instrumentation flags required.
+
+```bash
+brew install kcov            # macOS; on Debian/Ubuntu: sudo apt-get install kcov
+export SERPAPI_KEY=<secret_serpapi_key>
+zig build cov
+open zig-out/coverage/merged/index.html
+```
+
+Current state: **90.4% of lines covered** (225 of 249 in `src/client.zig`)
+without an API key, since the tests covering `html`, `searchArchive`, and
+`account` skip themselves rather than fail. With `SERPAPI_KEY` set — as in
+CI, which publishes the figure to every job summary — those paths execute
+too and coverage rises accordingly.
+
+The lines that remain uncovered either way are `errdefer` branches that only
+execute if the operating system refuses an allocation midway through a
+request.
+
+One caveat specific to Zig: a coverage run over the unit tests alone reports
+a flattering ~97% while actually exercising far less, because Zig never
+generates code for a generic (`anytype`) function that no test instantiates
+— so every HTTP method disappears from the denominator instead of counting
+as uncovered. `zig build cov` therefore measures the unit and integration
+binaries and merges the two reports.
 
 ## License
 

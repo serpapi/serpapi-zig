@@ -29,3 +29,25 @@ jobs:
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: zig build itest --summary all
+
+      - name: Install kcov
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: sudo apt-get update && sudo apt-get install -y kcov
+
+      - name: Code coverage
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: |
+          zig build cov
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          report = json.load(open("zig-out/coverage/merged/kcov-merged/coverage.json"))
+          print("## Code coverage: %s%%\n" % report["percent_covered"])
+          print("| file | covered | total | percent |")
+          print("|---|---|---|---|")
+          for f in report["files"]:
+              print("| %s | %s | %s | %s%% |" % (
+                  f["file"].split("/")[-1], f["covered_lines"],
+                  f["total_lines"], f["percent_covered"]))
+          EOF

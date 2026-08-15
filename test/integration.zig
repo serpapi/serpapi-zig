@@ -105,11 +105,24 @@ test "account API returns account info" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key });
     defer client.deinit();
 
-    var result = try client.account(.{});
+    var result = try client.account();
     defer result.deinit();
 
     try testing.expect(result.value.object.get("account_id") != null);
     try testing.expect(result.value.object.get("account_email") != null);
+}
+
+test "accountAs overrides the constructor api_key" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_key" });
+    defer client.deinit();
+
+    var result = try client.accountAs(std.json.Value, .{ .api_key = key });
+    defer result.deinit();
+
+    try testing.expect(result.value.object.get("account_id") != null);
 }
 
 test "search archive returns a past search" {
