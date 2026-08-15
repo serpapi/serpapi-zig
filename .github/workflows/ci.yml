@@ -30,42 +30,26 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: zig build itest --summary all
 
+  # Runs on macOS: kcov reads the unit-test binary's debug info there,
+  # while on Linux it reports zero instrumented files for that binary
+  # (the integration binary works on both).
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-
-      # kcov is no longer packaged for Ubuntu 24.04 and ships no prebuilt
-      # binaries, so build the release tag from source.
-      - name: Cache kcov
-        id: cache-kcov
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/bin/kcov
-          key: kcov-v43-ubuntu-24.04
-      - name: Build kcov
-        if: steps.cache-kcov.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build binutils-dev libcurl4-openssl-dev \
-            libdw-dev libiberty-dev zlib1g-dev
-          git clone --depth 1 --branch v43 https://github.com/SimonKagstrom/kcov.git /tmp/kcov
-          cmake -S /tmp/kcov -B /tmp/kcov/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          sudo cmake --build /tmp/kcov/build --target install
+      - name: Install kcov
+        run: brew install kcov
 
       - name: Code coverage
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
           zig build cov
-          echo "--- coverage tree ---"
-          find zig-out/coverage -maxdepth 2 -type d -print
-          echo "--- per-run reports ---"
           for f in $(find zig-out/coverage -maxdepth 3 -name coverage.json); do
-            echo "$f: $(head -c 400 $f | tr -d '\n')"
+            echo "$f: $(head -c 300 $f | tr -d '\n')"
           done
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
