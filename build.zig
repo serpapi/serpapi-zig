@@ -12,7 +12,8 @@ pub fn build(b: *std.Build) void {
     });
 
     // Unit tests: zig build test
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    // the name also disambiguates kcov's per-binary report directories
+    const mod_tests = b.addTest(.{ .name = "unit-tests", .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
@@ -24,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "serpapi", .module = mod }},
     });
-    const itests = b.addTest(.{ .root_module = itest_mod });
+    const itests = b.addTest(.{ .name = "integration-tests", .root_module = itest_mod });
     const run_itests = b.addRunArtifact(itests);
     const itest_step = b.step("itest", "Run integration tests against serpapi.com (needs SERPAPI_KEY)");
     itest_step.dependOn(&run_itests.step);
