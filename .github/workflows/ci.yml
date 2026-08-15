@@ -30,12 +30,33 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: zig build itest --summary all
 
-      - name: Install kcov
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: sudo apt-get update && sudo apt-get install -y kcov
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # kcov is no longer packaged for Ubuntu 24.04 and ships no prebuilt
+      # binaries, so build the release tag from source.
+      - name: Cache kcov
+        id: cache-kcov
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/kcov
+          key: kcov-v43-ubuntu-24.04
+      - name: Build kcov
+        if: steps.cache-kcov.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build binutils-dev libcurl4-openssl-dev \
+            libdw-dev libiberty-dev zlib1g-dev
+          git clone --depth 1 --branch v43 https://github.com/SimonKagstrom/kcov.git /tmp/kcov
+          cmake -S /tmp/kcov -B /tmp/kcov/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          sudo cmake --build /tmp/kcov/build --target install
 
       - name: Code coverage
-        if: ${{ matrix.os == 'ubuntu-latest' }}
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
@@ -51,3 +72,9 @@ jobs:
                   f["file"].split("/")[-1], f["covered_lines"],
                   f["total_lines"], f["percent_covered"]))
           EOF
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: zig-out/coverage/merged

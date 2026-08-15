@@ -68,6 +68,10 @@ This example runs a search for "coffee" on Google. It returns the results as a
 `std.json.Parsed(std.json.Value)` tree. See the
 [playground](https://serpapi.com/playground) to generate your own query.
 
+A complete, runnable version of this program lives in
+[oobt/demo.zig](oobt/demo.zig) — it prints the title and link of every
+organic result. Run it against the live API with `zig build oobt`.
+
 The SerpApi key can be obtained from [serpapi.com/signup](https://serpapi.com/users/sign_up?plan=free).
 
 Environment variables are a secure, safe, and easy way to manage secrets:
@@ -230,6 +234,40 @@ zig build bench   # benchmark persistent vs non-persistent connections (needs SE
 zig build cov     # measure code coverage (needs kcov + SERPAPI_KEY)
 zig build lint    # check formatting (zig fmt --check)
 zig build doc     # generate API documentation under zig-out/docs
+```
+
+A `Rakefile` wraps the same steps for anyone used to the other SerpApi
+libraries — `rake --tasks` lists them all.
+
+## Cross compilation
+
+Zig cross-compiles without a toolchain to install, so the library builds for
+every architecture listed in the
+[cross-compilation guide](https://zig.guide/build-system/cross-compilation)
+straight from a laptop:
+
+```bash
+rake cross           # all six architectures
+rake cross:aarch64   # or one at a time
+```
+
+| architecture | zig target | verified |
+|---|---|---|
+| `x86_64` | `x86_64-linux` | ELF 64-bit x86-64 |
+| `arm` | `arm-linux` | ELF 32-bit ARM EABI5 |
+| `aarch64` | `aarch64-linux` | ELF 64-bit ARM aarch64 |
+| `i386` | `x86-linux` | ELF 32-bit Intel 80386 |
+| `riscv64` | `riscv64-linux` | ELF 64-bit UCB RISC-V |
+| `wasm32` | `wasm32-wasi` | WebAssembly module |
+
+Note that Zig names the 32-bit x86 architecture `x86`, not `i386`.
+
+To *run* those foreign binaries — and the test suite — on a macOS host,
+install QEMU and pass `-fqemu`:
+
+```bash
+rake install:qemu    # brew install qemu
+rake cross:test      # zig build test -Dtarget=<triple> -fqemu
 ```
 
 ## Code coverage
