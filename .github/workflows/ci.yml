@@ -61,7 +61,12 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
           zig build cov
-          find zig-out/coverage -maxdepth 2 -name coverage.json -print
+          echo "--- coverage tree ---"
+          find zig-out/coverage -maxdepth 2 -type d -print
+          echo "--- per-run reports ---"
+          for f in $(find zig-out/coverage -maxdepth 3 -name coverage.json); do
+            echo "$f: $(head -c 400 $f | tr -d '\n')"
+          done
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
           report = json.load(open("zig-out/coverage/merged/kcov-merged/coverage.json"))
