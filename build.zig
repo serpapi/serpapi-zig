@@ -66,7 +66,10 @@ pub fn build(b: *std.Build) void {
     // the denominator. Both suites are measured and merged to cover the
     // HTTP paths; export SERPAPI_KEY for the full picture.
     const cov_dir = b.pathJoin(&.{ b.install_path, "coverage" });
-    const include = b.fmt("--include-path={s}", .{b.pathFromRoot("src")});
+    // Match on the path fragment rather than an absolute --include-path:
+    // the unit-test binary records source paths relative to the build root
+    // on Linux, so an absolute include path selects nothing there.
+    const include = "--include-pattern=src/";
 
     // kcov does not create missing parent directories
     const cov_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", cov_dir });
