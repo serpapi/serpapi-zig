@@ -43,7 +43,7 @@ end
 desc 'measure code coverage with kcov (needs kcov, SERPAPI_KEY)'
 task :cov do
   sh 'zig build cov'
-  puts 'report: zig-out/coverage/merged/index.html'
+  puts 'report: zig-out/coverage/kcov-merged/index.html'
 end
 
 desc 'check formatting with zig fmt'

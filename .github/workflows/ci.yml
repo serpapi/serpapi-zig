@@ -63,7 +63,7 @@ jobs:
           zig build cov
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
-          report = json.load(open("zig-out/coverage/merged/kcov-merged/coverage.json"))
+          report = json.load(open("zig-out/coverage/kcov-merged/coverage.json"))
           print("## Code coverage: %s%%\n" % report["percent_covered"])
           print("| file | covered | total | percent |")
           print("|---|---|---|---|")
@@ -77,4 +77,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: zig-out/coverage/merged
+          path: zig-out/coverage/kcov-merged
