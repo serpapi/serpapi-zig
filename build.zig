@@ -72,28 +72,25 @@ pub fn build(b: *std.Build) void {
     const cov_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", cov_dir });
     cov_mkdir.has_side_effects = true;
 
-    // Both runs write into the same output directory, side by side, so the
-    // merge can name each report directory explicitly. Merging the parent
-    // directories instead silently keeps only one of them on Linux.
-    const cov_unit = b.addSystemCommand(&.{ "kcov", include, cov_dir });
+    const cov_unit = b.addSystemCommand(&.{ "kcov", include, b.pathJoin(&.{ cov_dir, "unit" }) });
     cov_unit.addArtifactArg(mod_tests);
     cov_unit.has_side_effects = true;
     cov_unit.step.dependOn(&cov_mkdir.step);
 
-    const cov_itest = b.addSystemCommand(&.{ "kcov", include, cov_dir });
+    const cov_itest = b.addSystemCommand(&.{ "kcov", include, b.pathJoin(&.{ cov_dir, "itest" }) });
     cov_itest.addArtifactArg(itests);
     cov_itest.has_side_effects = true;
-    // serialized: both write into the same directory
-    cov_itest.step.dependOn(&cov_unit.step);
+    cov_itest.step.dependOn(&cov_mkdir.step);
 
-    const cov_merge = b.addSystemCommand(&.{
-        "kcov",
-        "--merge",
-        b.pathJoin(&.{ cov_dir, "merged" }),
-        b.pathJoin(&.{ cov_dir, "unit-tests" }),
-        b.pathJoin(&.{ cov_dir, "integration-tests" }),
-    });
+    // Merge the per-run report directories, whose names carry a build hash
+    // (`unit-tests.a1b2c3d4`). Handing kcov their parent directory instead
+    // silently keeps only one of the two on Linux.
+    const cov_merge = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
+        "rm -rf {0s}/merged && kcov --merge {0s}/merged {0s}/unit/unit-tests.* {0s}/itest/integration-tests.*",
+        .{cov_dir},
+    ) });
     cov_merge.has_side_effects = true;
+    cov_merge.step.dependOn(&cov_unit.step);
     cov_merge.step.dependOn(&cov_itest.step);
 
     const cov_step = b.step("cov", "Measure code coverage with kcov (needs kcov; SERPAPI_KEY for full coverage)");
