@@ -279,7 +279,7 @@ Zig binaries support out of the box — no instrumentation flags required.
 brew install kcov            # macOS; on Debian/Ubuntu: sudo apt-get install kcov
 export SERPAPI_KEY=<secret_serpapi_key>
 zig build cov
-open zig-out/coverage/kcov-merged/index.html
+open zig-out/coverage/merged/kcov-merged/index.html
 ```
 
 Current state: **90.4% of lines covered** (225 of 249 in `src/client.zig`)

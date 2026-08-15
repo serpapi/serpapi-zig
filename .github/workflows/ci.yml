@@ -61,9 +61,10 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
           zig build cov
+          find zig-out/coverage -maxdepth 2 -name coverage.json -print
           python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json
-          report = json.load(open("zig-out/coverage/kcov-merged/coverage.json"))
+          report = json.load(open("zig-out/coverage/merged/kcov-merged/coverage.json"))
           print("## Code coverage: %s%%\n" % report["percent_covered"])
           print("| file | covered | total | percent |")
           print("|---|---|---|---|")
@@ -77,4 +78,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: zig-out/coverage/kcov-merged
+          path: zig-out/coverage/merged/kcov-merged

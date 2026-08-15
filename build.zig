@@ -72,9 +72,9 @@ pub fn build(b: *std.Build) void {
     const cov_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", cov_dir });
     cov_mkdir.has_side_effects = true;
 
-    // Both runs write into the same output directory: kcov unions every
-    // report it finds there into <cov_dir>/kcov-merged. `kcov --merge` of
-    // two separate directories drops one of them on Linux.
+    // Both runs write into the same output directory, side by side, so the
+    // merge can name each report directory explicitly. Merging the parent
+    // directories instead silently keeps only one of them on Linux.
     const cov_unit = b.addSystemCommand(&.{ "kcov", include, cov_dir });
     cov_unit.addArtifactArg(mod_tests);
     cov_unit.has_side_effects = true;
@@ -83,11 +83,21 @@ pub fn build(b: *std.Build) void {
     const cov_itest = b.addSystemCommand(&.{ "kcov", include, cov_dir });
     cov_itest.addArtifactArg(itests);
     cov_itest.has_side_effects = true;
-    // serialized: both write the same directory
+    // serialized: both write into the same directory
     cov_itest.step.dependOn(&cov_unit.step);
 
+    const cov_merge = b.addSystemCommand(&.{
+        "kcov",
+        "--merge",
+        b.pathJoin(&.{ cov_dir, "merged" }),
+        b.pathJoin(&.{ cov_dir, "unit-tests" }),
+        b.pathJoin(&.{ cov_dir, "integration-tests" }),
+    });
+    cov_merge.has_side_effects = true;
+    cov_merge.step.dependOn(&cov_itest.step);
+
     const cov_step = b.step("cov", "Measure code coverage with kcov (needs kcov; SERPAPI_KEY for full coverage)");
-    cov_step.dependOn(&cov_itest.step);
+    cov_step.dependOn(&cov_merge.step);
 
     // Lint: zig build lint (checks formatting)
     const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench" }, .check = true });
