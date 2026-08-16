@@ -144,16 +144,6 @@ yourself.
 const page = try client.html(.{ .q = "coffee" });
 ```
 
-### Search API — Markdown
-
-`markdown` returns the result rendered as Markdown via the `/md` endpoint.
-It is a convenient format to feed straight into an LLM prompt or a RAG
-pipeline without an HTML/JSON parsing step.
-
-```zig
-const page = try client.markdown(.{ .q = "coffee" });
-```
-
 ### Location API
 
 ```zig

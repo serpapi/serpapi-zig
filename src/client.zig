@@ -1,7 +1,7 @@
 //! SerpApi.com client implementation.
 //!
 //! Features:
-//!  * search API (JSON, raw HTML, and Markdown)
+//!  * search API (JSON and raw HTML)
 //!  * location API
 //!  * account API
 //!  * search archive API
@@ -167,16 +167,6 @@ pub const Client = struct {
         else
             &.{.{ .key = "output", .value = "html" }};
         return self.getRaw("/search", params, extra);
-    }
-
-    /// Perform a search using SerpApi.com and return the result rendered as
-    /// Markdown, via the `/md` endpoint. Useful for feeding search results
-    /// straight into an LLM prompt or a RAG pipeline without an HTML/JSON
-    /// parsing step.
-    ///
-    /// Caller owns the returned slice and must free it.
-    pub fn markdown(self: *Client, params: anytype) ![]u8 {
-        return self.getRaw("/md", params, &.{});
     }
 
     /// Get locations using the Location API, as a dynamic JSON tree.
@@ -594,19 +584,6 @@ test "buildUrl extra parameters yield to call parameters" {
     try testing.expectEqualStrings(
         "https://serpapi.com/search?q=coffee&output=json&source=serpapi-zig%3A" ++ version,
         override,
-    );
-}
-
-test "buildUrl for the markdown endpoint" {
-    var client = try Client.init(testing.allocator, .{ .engine = "google" });
-    defer client.deinit();
-
-    const url = try client.buildUrl(testing.allocator, "/md", .{ .q = "coffee" }, &.{});
-    defer testing.allocator.free(url);
-
-    try testing.expectEqualStrings(
-        "https://serpapi.com/md?q=coffee&engine=google&source=serpapi-zig%3A" ++ version,
-        url,
     );
 }
 
