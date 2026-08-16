@@ -466,7 +466,6 @@ pub const Client = struct {
 
         if (response.status != .ok) {
             try self.captureError(response.body, @tagName(response.status));
-            self.allocator.free(response.body);
             return Error.HttpRequestFailed;
         }
         return response.body;
