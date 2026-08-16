@@ -1,5 +1,6 @@
 zig-out/
 .zig-cache/
 zig-cache/
+zig-pkg/
 .DS_Store
 serpapi_zig_*.csv

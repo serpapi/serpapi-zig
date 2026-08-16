@@ -25,7 +25,7 @@ Zig 0.16.0 or higher is required.
 Add the dependency to your project:
 
 ```bash
-zig fetch --save git+https://github.com/serpapi/serpapi-zig
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'
 ```
 
 Then wire the module in your `build.zig`:
@@ -37,6 +37,54 @@ const serpapi = b.dependency("serpapi", .{
 });
 exe.root_module.addImport("serpapi", serpapi.module("serpapi"));
 ```
+
+### Versioning
+
+Zig has no central package registry, so there is no version *range* to
+resolve: a dependency is a URL plus a content hash. Releases are published
+as git tags named `vMAJOR.MINOR.PATCH`, following
+[semantic versioning](https://semver.org), and the fragment after `#`
+selects which one you get:
+
+```bash
+# a released version (recommended)
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'
+
+# the development branch — moves, may break
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig'
+
+# an exact commit; the SHA must be the full 40 characters
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#4451c6c4b5a2dc68d7249a2a97f032470ab2070d'
+```
+
+Whichever form you use, `--save` resolves it at fetch time and records the
+result as an immutable pin, so a tag that is later moved cannot change your
+build:
+
+```zig
+.dependencies = .{
+    .serpapi = .{
+        .url = "git+https://github.com/serpapi/serpapi-zig?ref=v1.0.0#b7b6dbd303fb36b3331fc8265bc28925ba4ca2a5",
+        .hash = "serpapi-1.0.0-PYmxE0B-AABZru95tORJSVF468kIbL_5Ri3-JC6bZBxT",
+    },
+},
+```
+
+The `hash` — not the URL — is what actually identifies the package, so
+always upgrade by re-running `zig fetch --save` with the new tag, which
+rewrites the URL, the resolved commit and the hash together. Editing the
+version in the URL by hand does *not* upgrade anything: the old hash still
+resolves to the old package, and the build quietly keeps using it.
+
+A release tarball works too, and produces the same hash as its tag:
+
+```bash
+zig fetch --save 'https://github.com/serpapi/serpapi-zig/archive/refs/tags/v1.0.0.tar.gz'
+```
+
+Released versions are listed on the
+[releases page](https://github.com/serpapi/serpapi-zig/releases); changes
+are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Simple Usage
 
@@ -308,6 +356,9 @@ zig build serve
 `std.heap.page_allocator` code with no wasm-only APIs, so it is unit tested
 natively as part of `zig build test` — no wasm runtime needed for that; only
 running it in an actual browser needs `zig build serve`.
+
+See [demo/wasm/README.md](demo/wasm/README.md) for the wasm module's
+JS/wasm interface and notes on adapting the demo to your own backend.
 
 ## Code coverage
 
