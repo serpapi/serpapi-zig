@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Search API: `markdown` decoder via the `/md` endpoint
+
 ## 1.0.0 (2026-08-13)
 
 Initial release, ported from [serpapi-ruby](https://github.com/serpapi/serpapi-ruby).
