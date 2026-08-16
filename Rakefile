@@ -53,7 +53,7 @@ end
 
 desc 'format the code in place'
 task :format do
-  sh 'zig fmt build.zig src test oobt bench'
+  sh 'zig fmt build.zig src test oobt bench demo/wasm'
 end
 
 desc 'build the API documentation'
@@ -65,6 +65,16 @@ end
 desc 'benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)'
 task :bench do
   sh 'zig build bench'
+end
+
+desc 'build the browser wasm demo into zig-out/demo-wasm/'
+task :wasm do
+  sh 'zig build wasm'
+end
+
+desc 'serve the browser wasm demo at http://127.0.0.1:8080 (needs SERPAPI_KEY)'
+task :serve do
+  sh 'zig build serve'
 end
 
 desc 'delete build artifacts'

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>serpapi-zig — wasm demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 42rem;
+    margin: 2rem auto;
+    padding: 0 1rem;
+  }
+  h1 { font-size: 1.3rem; }
+  form { display: flex; gap: 0.5rem; margin: 1rem 0; }
+  input { flex: 1; padding: 0.5rem; font-size: 1rem; }
+  button { padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+  #status { color: #888; font-size: 0.9rem; min-height: 1.2em; }
+  #results { white-space: pre-wrap; }
+  #results a { word-break: break-all; }
+  .note {
+    font-size: 0.85rem;
+    color: #888;
+    border-left: 3px solid #888;
+    padding-left: 0.75rem;
+    margin: 1.5rem 0;
+  }
+</style>
+</head>
+<body>
+<h1>serpapi-zig — browser wasm demo</h1>
+<p>
+  Search query building and JSON parsing run as WebAssembly, compiled from
+  <code>demo/wasm/serpapi_wasm.zig</code>. The actual HTTP request to
+  SerpApi.com is made server-side by <code>demo/wasm/serve.zig</code> — see
+  the note below for why.
+</p>
+
+<form id="search-form">
+  <input id="query" type="text" placeholder="coffee" value="coffee" autofocus>
+  <input id="engine" type="text" placeholder="google" value="google" style="flex: 0 0 8rem;">
+  <button type="submit">Search</button>
+</form>
+
+<div id="status"></div>
+<div id="results"></div>
+
+<p class="note">
+  Wasm running in a browser has no socket or TLS access, so it cannot open
+  an HTTPS connection to serpapi.com itself — that is a browser sandboxing
+  rule, not a Zig limitation. This page's <code>fetch()</code> instead
+  calls a same-origin <code>/api/search</code> endpoint, served by
+  <code>zig build serve</code>, which forwards the request using the
+  regular <code>serpapi.Client</code> from this repository. That also
+  keeps the secret <code>SERPAPI_KEY</code> on the server, never exposed to
+  the browser — the way a real API-key-backed integration should be built,
+  wasm or not.
+</p>
+
+<script>
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+
+// The module owns and exports its own linear memory (it has no imports at
+// all — everything it needs, including the allocator, is self-contained).
+function readString(ptr, len) {
+  return new TextDecoder().decode(new Uint8Array(wasm.exports.memory.buffer, ptr, len));
+}
+
+function writeString(str) {
+  const bytes = new TextEncoder().encode(str);
+  const ptr = wasm.exports.alloc(bytes.length);
+  if (ptr === 0 && bytes.length > 0) throw new Error("wasm allocation failed");
+  new Uint8Array(wasm.exports.memory.buffer, ptr, bytes.length).set(bytes);
+  return { ptr, len: bytes.length };
+}
+
+let wasm;
+
+async function loadWasm() {
+  const response = await fetch("serpapi_wasm.wasm");
+  const { instance } = await WebAssembly.instantiateStreaming(response, {});
+  return instance;
+}
+
+async function runSearch(engine, query) {
+  statusEl.textContent = "building request in wasm…";
+  resultsEl.textContent = "";
+
+  const e = writeString(engine);
+  const q = writeString(query);
+  const pathBuf = wasm.exports.alloc(2048);
+  const pathLen = wasm.exports.buildSearchPath(e.ptr, e.len, q.ptr, q.len, pathBuf, 2048);
+  wasm.exports.dealloc(e.ptr, e.len);
+  wasm.exports.dealloc(q.ptr, q.len);
+  if (pathLen === 0) throw new Error("failed to build the request path");
+  const path = readString(pathBuf, pathLen);
+  wasm.exports.dealloc(pathBuf, 2048);
+
+  statusEl.textContent = `fetching ${path}…`;
+  const response = await fetch(path);
+  const json = await response.text();
+
+  statusEl.textContent = "parsing response in wasm…";
+  const j = writeString(json);
+  const outCap = Math.max(json.length * 2, 4096);
+  const outBuf = wasm.exports.alloc(outCap);
+  const outLen = wasm.exports.summarize(j.ptr, j.len, outBuf, outCap);
+  wasm.exports.dealloc(j.ptr, j.len);
+  const markdown = outLen > 0 ? readString(outBuf, outLen) : "(no organic results found)";
+  wasm.exports.dealloc(outBuf, outCap);
+
+  statusEl.textContent = response.ok
+    ? `done — ${path}`
+    : `serpapi.com error (HTTP ${response.status})`;
+  resultsEl.textContent = markdown;
+}
+
+document.getElementById("search-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const engine = document.getElementById("engine").value || "google";
+  const query = document.getElementById("query").value;
+  runSearch(engine, query).catch((err) => {
+    statusEl.textContent = "error: " + err.message;
+  });
+});
+
+loadWasm()
+  .then((instance) => {
+    wasm = instance;
+    statusEl.textContent = "wasm module loaded — ready to search";
+  })
+  .catch((err) => {
+    statusEl.textContent = "failed to load wasm module: " + err.message;
+  });
+</script>
+</body>
+</html>

@@ -242,6 +242,8 @@ zig build itest   # run integration tests against serpapi.com (needs SERPAPI_KEY
 zig build oobt    # out-of-box testing: build + run the demo app (needs SERPAPI_KEY)
 zig build bench   # benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)
 zig build cov     # measure code coverage (needs kcov + SERPAPI_KEY)
+zig build wasm    # build the browser wasm demo into zig-out/demo-wasm/
+zig build serve   # serve the browser wasm demo at http://127.0.0.1:8080 (needs SERPAPI_KEY)
 zig build lint    # check formatting (zig fmt --check)
 zig build doc     # generate API documentation under zig-out/docs
 ```
@@ -279,6 +281,43 @@ install QEMU and pass `-fqemu`:
 rake install:qemu    # brew install qemu
 rake cross:test      # zig build test -Dtarget=<triple> -fqemu
 ```
+
+## Browser wasm demo
+
+[demo/wasm](demo/wasm) runs part of the client as WebAssembly inside a web
+page. It is a demo, not a way to ship the whole `serpapi.Client` to the
+browser — browsers give WebAssembly no sockets and no TLS, so
+`std.http.Client` cannot open a connection to serpapi.com from inside the
+page, and serpapi.com does not send CORS headers permitting cross-origin
+`fetch()` anyway. So the demo splits the work the way a real browser
+integration has to:
+
+- **[serpapi_wasm.zig](demo/wasm/serpapi_wasm.zig)** compiles to
+  `wasm32-freestanding` and runs in the page. It does the two things that
+  are pure computation: percent-encode the search into a request path, and
+  parse the JSON response into a short Markdown list of results.
+- **[serve.zig](demo/wasm/serve.zig)** is a small native server, built with
+  this repository's own zero-dependency `serpapi.Client`. It serves the
+  page and wasm binary and exposes a same-origin `/api/search` endpoint
+  that forwards to serpapi.com — keeping `SERPAPI_KEY` on the server and
+  out of the browser entirely, same-origin so no CORS problem exists.
+- **[index.html](demo/wasm/index.html)** wires the two together: it writes
+  the query into wasm memory, calls the wasm module to build the request
+  path, `fetch()`es it from the server, and hands the JSON response back to
+  wasm to render.
+
+Run it:
+
+```bash
+export SERPAPI_KEY=<secret_serpapi_key>
+zig build serve
+# open http://127.0.0.1:8080
+```
+
+`serpapi_wasm.zig`'s compute logic (URL building, JSON parsing) is plain
+`std.heap.page_allocator` code with no wasm-only APIs, so it is unit tested
+natively as part of `zig build test` — no wasm runtime needed for that; only
+running it in an actual browser needs `zig build serve`.
 
 ## Code coverage
 

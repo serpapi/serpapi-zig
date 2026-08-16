@@ -59,6 +59,67 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)");
     bench_step.dependOn(&run_bench.step);
 
+    // Browser wasm demo: the module that actually runs inside the page.
+    // Freestanding, not wasi: browsers give wasm no sockets/TLS, so this
+    // module only builds query strings and parses JSON responses; the
+    // network request is made by the page's own fetch() (see index.html)
+    // against serve.zig's same-origin proxy.
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("demo/wasm/serpapi_wasm.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const wasm_exe = b.addExecutable(.{ .name = "serpapi_wasm", .root_module = wasm_mod });
+    wasm_exe.entry = .disabled;
+    wasm_exe.rdynamic = true;
+
+    const install_wasm = b.addInstallArtifact(wasm_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "demo-wasm" } },
+    });
+    const install_wasm_html = b.addInstallFileWithDir(
+        b.path("demo/wasm/index.html"),
+        .{ .custom = "demo-wasm" },
+        "index.html",
+    );
+    const wasm_step = b.step("wasm", "Build the browser wasm demo into zig-out/demo-wasm/");
+    wasm_step.dependOn(&install_wasm.step);
+    wasm_step.dependOn(&install_wasm_html.step);
+
+    // The wasm demo's compute logic is plain std.heap.page_allocator code,
+    // so it is tested natively (fast, no wasm runtime needed) and included
+    // in the regular unit test step.
+    const wasm_demo_tests_mod = b.createModule(.{
+        .root_source_file = b.path("demo/wasm/serpapi_wasm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const wasm_demo_tests = b.addTest(.{ .name = "wasm-demo-tests", .root_module = wasm_demo_tests_mod });
+    const run_wasm_demo_tests = b.addRunArtifact(wasm_demo_tests);
+    test_step.dependOn(&run_wasm_demo_tests.step);
+
+    // Local dev server: static files + a same-origin proxy to serpapi.com
+    // (see demo/wasm/serve.zig for why the proxy exists).
+    const demo_config = b.addOptions();
+    demo_config.addOption([]const u8, "web_dir", b.getInstallPath(.prefix, "demo-wasm"));
+
+    const serve_exe = b.addExecutable(.{
+        .name = "serve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("demo/wasm/serve.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "serpapi", .module = mod },
+                .{ .name = "demo_config", .module = demo_config.createModule() },
+            },
+        }),
+    });
+    const run_serve = b.addRunArtifact(serve_exe);
+    run_serve.step.dependOn(wasm_step);
+    const serve_step = b.step("serve", "Serve the browser wasm demo at http://127.0.0.1:8080 (needs SERPAPI_KEY)");
+    serve_step.dependOn(&run_serve.step);
+
     // Code coverage: zig build cov (requires kcov)
     //
     // Zig omits generic (`anytype`) functions that a test binary never
@@ -100,7 +161,7 @@ pub fn build(b: *std.Build) void {
     cov_step.dependOn(&cov_merge.step);
 
     // Lint: zig build lint (checks formatting)
-    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench" }, .check = true });
+    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench", "demo/wasm" }, .check = true });
     const lint_step = b.step("lint", "Check code formatting (zig fmt --check)");
     lint_step.dependOn(&lint.step);
 
