@@ -323,28 +323,7 @@ rake cross:test      # zig build test -Dtarget=<triple> -fqemu
 ## Browser wasm demo
 
 [demo/wasm](demo/wasm) runs part of the client as WebAssembly inside a web
-page. It is a demo, not a way to ship the whole `serpapi.Client` to the
-browser — browsers give WebAssembly no sockets and no TLS, so
-`std.http.Client` cannot open a connection to serpapi.com from inside the
-page, and serpapi.com does not send CORS headers permitting cross-origin
-`fetch()` anyway. So the demo splits the work the way a real browser
-integration has to:
-
-- **[serpapi_wasm.zig](demo/wasm/serpapi_wasm.zig)** compiles to
-  `wasm32-freestanding` and runs in the page. It does the two things that
-  are pure computation: percent-encode the search into a request path, and
-  parse the JSON response into a short Markdown list of results.
-- **[serve.zig](demo/wasm/serve.zig)** is a small native server, built with
-  this repository's own zero-dependency `serpapi.Client`. It serves the
-  page and wasm binary and exposes a same-origin `/api/search` endpoint
-  that forwards to serpapi.com — keeping `SERPAPI_KEY` on the server and
-  out of the browser entirely, same-origin so no CORS problem exists.
-- **[index.html](demo/wasm/index.html)** wires the two together: it writes
-  the query into wasm memory, calls the wasm module to build the request
-  path, `fetch()`es it from the server, and hands the JSON response back to
-  wasm to render.
-
-Run it:
+page, with a small native server handling what a browser cannot:
 
 ```bash
 export SERPAPI_KEY=<secret_serpapi_key>
@@ -352,13 +331,9 @@ zig build serve
 # open http://127.0.0.1:8080
 ```
 
-`serpapi_wasm.zig`'s compute logic (URL building, JSON parsing) is plain
-`std.heap.page_allocator` code with no wasm-only APIs, so it is unit tested
-natively as part of `zig build test` — no wasm runtime needed for that; only
-running it in an actual browser needs `zig build serve`.
-
-See [demo/wasm/README.md](demo/wasm/README.md) for the wasm module's
-JS/wasm interface and notes on adapting the demo to your own backend.
+See **[demo/wasm/README.md](demo/wasm/README.md)** for how it fits together,
+the JS/wasm interface, and why the whole `serpapi.Client` cannot run in a
+browser.
 
 ## Code coverage
 

@@ -3,6 +3,11 @@
 Part of the SerpApi client compiled to WebAssembly and running inside a web
 page, with a small native server handling the parts a browser cannot.
 
+It is a demo, not a way to ship the whole `serpapi.Client` to the browser —
+see [what it would take to run the whole client in a
+browser](#what-it-would-take-to-run-the-whole-client-in-a-browser) for why,
+and what would have to change.
+
 ```bash
 export SERPAPI_KEY=<secret_serpapi_key>
 zig build serve
@@ -89,6 +94,71 @@ bump allocator on wasm targets and to a normal page allocator elsewhere.
 Nothing in it is wasm-only, so it is unit tested natively as part of
 `zig build test` — no wasm runtime or browser required. Only exercising it
 *as* wasm needs `zig build serve`.
+
+## What it would take to run the whole client in a browser
+
+A fair question is why the wasm module only builds URLs and parses JSON,
+rather than being the real `serpapi.Client`. The blockers are concrete and
+easy to reproduce.
+
+**The full client does not even link for the browser target.**
+`serpapi.Client` drives `std.http.Client` through a `std.Io.Threaded`, and
+that implementation is built on POSIX:
+
+```
+$ zig build-exe -target wasm32-freestanding ... # a program calling client.search()
+error: struct 'posix.system__struct_981' has no member named 'getrandom'
+    std/Io/Threaded.zig:2064
+error: struct 'posix.system__struct_981' has no member named 'IOV_MAX'
+    std/posix.zig:90
+```
+
+**Under WASI it links, but still cannot connect.** `wasm32-wasi` produces a
+working binary, yet its imports contain no socket calls at all — WASI
+preview1 has no outbound `sock_connect`, so there is nothing for TLS to run
+over:
+
+```
+$ zig build-exe -target wasm32-wasi ...   # links fine, 28 host imports
+$ # imports: fd_read, fd_write, random_get, poll_oneoff, … and no sockets
+```
+
+So four things would have to change:
+
+1. **An `Io` implementation that is not POSIX.** `std.Io` is a vtable
+   interface, so a browser-backed one is expressible — it is simply not
+   something the standard library ships today.
+2. **A byte stream to the host.** This is the hard blocker: browsers expose
+   no raw TCP. WebSocket, WebTransport and WebRTC all exist, but each needs
+   a cooperating endpoint on the other side, so a page can never speak
+   HTTP/1.1 directly to `serpapi.com:443`. The realistic transport is
+   `fetch()`, which means the client's own HTTP layer is bypassed and only
+   its *logic* (parameter merging, URL building, decoding, error handling)
+   runs in wasm.
+3. **CORS, which is not ours to fix.** Even over `fetch()`, a page may not
+   read a cross-origin response unless the server allows it, and
+   serpapi.com sends no `Access-Control-Allow-Origin`. Either SerpApi adds
+   it, or a proxy stays in the picture.
+4. **Async bridging.** `fetch()` returns a Promise while wasm exports are
+   synchronous, so a blocking `client.search()` needs
+   [JSPI](https://developer.mozilla.org/en-US/docs/WebAssembly/JavaScript_interface)
+   or an Asyncify pass. Without one, the call has to be split in two — build
+   the request, let JS fetch, hand the body back — which is exactly the
+   shape of this demo.
+
+And one that is a design decision rather than a limitation: an API key
+shipped to the browser is readable by anyone who opens devtools. Even with
+every blocker above solved, a key-authenticated API belongs behind your own
+server.
+
+The achievable version of "run the client in the browser" is therefore
+**a pluggable transport**: keep every bit of client logic in wasm and let
+the host move the bytes. In this codebase that means routing `Client.get()`
+through a transport interface instead of calling `std.http.Client` directly
+— a contained change, and worth doing if browser support is ever a goal.
+The TLS side would also need a CA bundle compiled in via `@embedFile`,
+since `std.crypto.Certificate.Bundle` normally reads the system trust store
+off a filesystem that a browser does not have.
 
 ## Using this as a starting point
 
