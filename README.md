@@ -14,6 +14,7 @@ Query a vast range of data at scale, including web search results, flight schedu
 
 ## Features
   * `persistent` → Keep socket connection open to save on SSL handshake / reconnection (2x faster).
+  * `md` → Markdown output, token-efficient and ready to feed to LLMs and AI agents. [Search API — Markdown](#search-api--markdown)
   * zero dependency → only the Zig standard library (`std.http`, `std.json`), nothing else to fetch.
   * cross platform → Linux, macOS, and Windows.
   * extensive documentation → easy to follow.
@@ -128,7 +129,8 @@ above reads it with `init.environ_map.get("SERPAPI_KEY")` — never hardcode
 the key in source code.
 
 As everywhere in Zig, the caller owns returned resources: results from JSON
-APIs are released with `deinit()`, raw HTML slices with `allocator.free()`.
+APIs are released with `deinit()`, raw HTML and Markdown slices with
+`allocator.free()`.
 The remaining examples omit the `defer` cleanup lines for brevity.
 
 ## Client options
@@ -192,6 +194,24 @@ yourself.
 const page = try client.html(.{ .q = "coffee" });
 ```
 
+doc: [serpapi.com/search-api](https://serpapi.com/search-api)
+
+### Search API — Markdown
+
+`md` returns the search results as Markdown: the same page the search engine
+served, rendered by the backend into a compact, token-efficient document. It
+is useful for feeding search results directly into LLMs, AI agents, and RAG
+pipelines, where raw HTML would waste most of the context window.
+
+```zig
+const page = try client.md(.{ .q = "coffee" });
+```
+
+This code prints the search results as Markdown — headings, tables, and
+links, with no HTML markup to strip. :)
+
+doc: [serpapi.com/search-api](https://serpapi.com/search-api)
+
 ### Location API
 
 ```zig
@@ -210,7 +230,12 @@ var archived = try client.searchArchive(search_id);
 
 // or as raw HTML:
 const page = try client.searchArchiveHtml(search_id);
+
+// or as Markdown:
+const markdown = try client.searchArchiveMd(search_id);
 ```
+
+Retrieving a past search from the archive is free of charge.
 
 doc: [serpapi.com/search-archive-api](https://serpapi.com/search-archive-api)
 
@@ -348,7 +373,7 @@ open zig-out/coverage/merged/kcov-merged/index.html
 ```
 
 Current state: **90.4% of lines covered** (225 of 249 in `src/client.zig`)
-without an API key, since the tests covering `html`, `searchArchive`, and
+without an API key, since the tests covering `html`, `md`, `searchArchive`, and
 `account` skip themselves rather than fail. With `SERPAPI_KEY` set — as in
 CI, which publishes the figure to every job summary — those paths execute
 too and coverage rises accordingly.

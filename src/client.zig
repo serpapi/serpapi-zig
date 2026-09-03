@@ -1,7 +1,7 @@
 //! SerpApi.com client implementation.
 //!
 //! Features:
-//!  * search API (JSON and raw HTML)
+//!  * search API (JSON, raw HTML, and Markdown)
 //!  * location API
 //!  * account API
 //!  * search archive API
@@ -169,6 +169,20 @@ pub const Client = struct {
         return self.getRaw("/search", params, extra);
     }
 
+    /// Perform a search using SerpApi.com and return the results as Markdown,
+    /// a compact, token-efficient rendering of the search engine result page.
+    /// Useful for feeding results straight into LLMs and AI agents.
+    ///
+    /// Caller owns the returned slice and must free it.
+    pub fn md(self: *Client, params: anytype) ![]u8 {
+        // the backend replies with JSON unless output=md is requested
+        const extra: []const Param = if (@hasField(@TypeOf(params), "output"))
+            &.{}
+        else
+            &.{.{ .key = "output", .value = "md" }};
+        return self.getRaw("/search", params, extra);
+    }
+
     /// Get locations using the Location API, as a dynamic JSON tree.
     /// For typed decoding see `locationAs`.
     ///
@@ -209,6 +223,15 @@ pub const Client = struct {
     /// Caller owns the returned slice and must free it.
     pub fn searchArchiveHtml(self: *Client, search_id: []const u8) ![]u8 {
         const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.html", .{search_id});
+        defer self.allocator.free(endpoint);
+        return self.getRaw(endpoint, .{}, &.{});
+    }
+
+    /// Retrieve a search result from the Search Archive API as Markdown.
+    ///
+    /// Caller owns the returned slice and must free it.
+    pub fn searchArchiveMd(self: *Client, search_id: []const u8) ![]u8 {
+        const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.md", .{search_id});
         defer self.allocator.free(endpoint);
         return self.getRaw(endpoint, .{}, &.{});
     }
@@ -584,6 +607,20 @@ test "buildUrl extra parameters yield to call parameters" {
     try testing.expectEqualStrings(
         "https://serpapi.com/search?q=coffee&output=json&source=serpapi-zig%3A" ++ version,
         override,
+    );
+}
+
+test "buildUrl markdown output" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const extra: []const Param = &.{.{ .key = "output", .value = "md" }};
+
+    const url = try client.buildUrl(testing.allocator, "/search", .{ .q = "coffee" }, extra);
+    defer testing.allocator.free(url);
+    try testing.expectEqualStrings(
+        "https://serpapi.com/search?q=coffee&output=md&source=serpapi-zig%3A" ++ version,
+        url,
     );
 }
 

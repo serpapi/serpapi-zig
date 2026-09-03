@@ -71,6 +71,20 @@ test "html returns raw page" {
     try testing.expect(std.ascii.indexOfIgnoreCase(page, "<html") != null);
 }
 
+test "md returns markdown page" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
+    defer client.deinit();
+
+    const page = try client.md(.{ .q = "coffee" });
+    defer testing.allocator.free(page);
+
+    try testing.expect(page.len > 0);
+    try testing.expect(std.ascii.indexOfIgnoreCase(page, "<html") == null);
+}
+
 test "location API returns Austin locations" {
     var client = try serpapi.Client.init(testing.allocator, .{});
     defer client.deinit();

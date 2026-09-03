@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Markdown output: `md` (Search API) and `searchArchiveMd` (Search Archive
+  API), returning the results as token-efficient Markdown for LLMs and AI
+  agents, via the `output=md` format
 - Browser wasm demo (`demo/wasm`): a `wasm32-freestanding` module for
   request building and JSON parsing, served by a native proxy
   (`zig build serve`) that keeps `SERPAPI_KEY` off the browser
