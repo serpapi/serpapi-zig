@@ -45,7 +45,11 @@ jobs:
   # ptrace on macOS, so the job is time-boxed and does not fail the workflow.
   coverage:
     runs-on: macos-latest
-    timeout-minutes: 20
+    # A generous backstop for the whole job (checkout/setup/brew), well
+    # above the coverage step's own 15m cap so that cap is what normally
+    # fires. A job-level timeout cancels the job, which continue-on-error
+    # cannot suppress, so it must not be the common case.
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +60,7 @@ jobs:
         run: brew install kcov
 
       - name: Code coverage
+        timeout-minutes: 15
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
