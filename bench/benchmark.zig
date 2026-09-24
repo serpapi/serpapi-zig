@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
 
         var client = try serpapi.Client.init(allocator, .{
             .api_key = key,
-            .engine = "google",
+            .engine = "search_index",
             .persistent = persistent,
         });
         defer client.deinit();

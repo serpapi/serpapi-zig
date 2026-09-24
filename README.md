@@ -121,6 +121,18 @@ A complete, runnable version of this program lives in
 [oobt/demo.zig](oobt/demo.zig) — it prints the title and link of every
 organic result. Run it against the live API with `zig build oobt`.
 
+For a typed-result example against a different engine, see
+[demo/flight_tracker](demo/flight_tracker) — a **standalone** Zig project
+(its own `build.zig`/`build.zig.zon`, not built through this repo's
+`build.zig`) that tracks a round trip from Austin to Paris on the Google
+Flights API. It doubles as a worked example of wiring `serpapi` into a
+downstream project's build:
+
+```bash
+cd demo/flight_tracker
+SERPAPI_KEY=<secret_serpapi_key> zig build run
+```
+
 The SerpApi key can be obtained from [serpapi.com/signup](https://serpapi.com/users/sign_up?plan=free).
 
 Environment variables are a secure, safe, and easy way to manage secrets:
@@ -305,8 +317,6 @@ zig build itest   # run integration tests against serpapi.com (needs SERPAPI_KEY
 zig build oobt    # out-of-box testing: build + run the demo app (needs SERPAPI_KEY)
 zig build bench   # benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)
 zig build cov     # measure code coverage (needs kcov + SERPAPI_KEY)
-zig build wasm    # build the browser wasm demo into zig-out/demo-wasm/
-zig build serve   # serve the browser wasm demo at http://127.0.0.1:8080 (needs SERPAPI_KEY)
 zig build lint    # check formatting (zig fmt --check)
 zig build doc     # generate API documentation under zig-out/docs
 ```
@@ -348,9 +358,13 @@ rake cross:test      # zig build test -Dtarget=<triple> -fqemu
 ## Browser wasm demo
 
 [demo/wasm](demo/wasm) runs part of the client as WebAssembly inside a web
-page, with a small native server handling what a browser cannot:
+page, with a small native server handling what a browser cannot. It is a
+**standalone** Zig project (its own `build.zig`/`build.zig.zon`, not built
+through this repo's `build.zig`) and doubles as a worked example of wiring
+`serpapi` into a downstream project's build:
 
 ```bash
+cd demo/wasm
 export SERPAPI_KEY=<secret_serpapi_key>
 zig build serve
 # open http://127.0.0.1:8080

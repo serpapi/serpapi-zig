@@ -3,12 +3,18 @@
 Part of the SerpApi client compiled to WebAssembly and running inside a web
 page, with a small native server handling the parts a browser cannot.
 
+This is a **standalone** Zig project — its own `build.zig`/`build.zig.zon`,
+not built through the parent serpapi-zig repo's `build.zig` — and it doubles
+as a worked example of wiring `serpapi` into a downstream project's build
+(see [Integrating the library](#integrating-the-library) below).
+
 It is a demo, not a way to ship the whole `serpapi.Client` to the browser —
 see [what it would take to run the whole client in a
 browser](#what-it-would-take-to-run-the-whole-client-in-a-browser) for why,
 and what would have to change.
 
 ```bash
+cd demo/wasm
 export SERPAPI_KEY=<secret_serpapi_key>
 zig build serve
 # open http://127.0.0.1:8080
@@ -83,17 +89,36 @@ path as a successful one.
 
 ## Building and testing
 
+Run these from inside `demo/wasm` — this is its own Zig project, separate
+from the parent repo's `build.zig`:
+
 ```bash
-zig build wasm    # build only, into zig-out/demo-wasm/
+zig build wasm    # build only, into zig-out/web/
 zig build serve   # build, then serve at http://127.0.0.1:8080 (needs SERPAPI_KEY)
-zig build test    # includes this module's unit tests
+zig build test    # this module's unit tests
 ```
 
 The compute logic uses `std.heap.page_allocator`, which resolves to the wasm
 bump allocator on wasm targets and to a normal page allocator elsewhere.
-Nothing in it is wasm-only, so it is unit tested natively as part of
-`zig build test` — no wasm runtime or browser required. Only exercising it
-*as* wasm needs `zig build serve`.
+Nothing in it is wasm-only, so it is unit tested natively with `zig build
+test` — no wasm runtime or browser required. Only exercising it *as* wasm
+needs `zig build serve`.
+
+## Integrating the library
+
+[build.zig.zon](build.zig.zon) and [build.zig](build.zig) show the two
+pieces every user project needs to depend on `serpapi` — only `serve.zig`
+actually uses it, since `serpapi_wasm.zig` runs in the browser and has no
+dependency on the library at all:
+
+1. A `serpapi` entry under `.dependencies` in `build.zig.zon`. This demo
+   points it at the parent directory with `.path = "../.."` since it lives
+   inside the serpapi-zig repo itself — an external project instead runs
+   `zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'`,
+   which writes a `url` + `hash` pair there. See the main
+   [README's "Installation" section](../../README.md#installation).
+2. `b.dependency("serpapi", .{...}).module("serpapi")` in `build.zig`,
+   wired into `serve_exe` with `addImport`/`imports`.
 
 ## What it would take to run the whole client in a browser
 

@@ -1,0 +1,24 @@
+.{
+    .name = .serpapi_wasm_demo,
+    .version = "0.1.0",
+    .fingerprint = 0xc1e99b59d9a317c5,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Path dependency: this demo lives inside the serpapi-zig repo, so it
+        // points straight at the parent directory instead of fetching a
+        // release. A real, standalone project instead runs:
+        //
+        //   zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'
+        //
+        // which writes a `url` + `hash` pair here — see the main
+        // README's "Installation" section for details.
+        .serpapi = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "serpapi_wasm.zig",
+        "serve.zig",
+        "index.html",
+    },
+}
