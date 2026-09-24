@@ -53,7 +53,7 @@ end
 
 desc 'format the code in place'
 task :format do
-  sh 'zig fmt build.zig src test oobt bench demo/wasm'
+  sh 'zig fmt build.zig src test oobt bench demo'
 end
 
 desc 'build the API documentation'
@@ -67,20 +67,28 @@ task :bench do
   sh 'zig build bench'
 end
 
-desc 'build the browser wasm demo into zig-out/demo-wasm/'
+desc 'build the browser wasm demo into demo/wasm/zig-out/web/'
 task :wasm do
-  sh 'zig build wasm'
+  sh 'zig build wasm --build-file demo/wasm/build.zig'
 end
 
 desc 'serve the browser wasm demo at http://127.0.0.1:8080 (needs SERPAPI_KEY)'
 task :serve do
-  sh 'zig build serve'
+  sh 'zig build serve --build-file demo/wasm/build.zig'
+end
+
+desc 'build the standalone demos (flight tracker, browser wasm) and run their tests'
+task :demos do
+  sh 'zig build --build-file demo/flight_tracker/build.zig'
+  sh 'zig build test --build-file demo/wasm/build.zig --summary all'
 end
 
 desc 'delete build artifacts'
 task :clean do
-  rm_rf 'zig-out'
-  rm_rf '.zig-cache'
+  %w[. demo/flight_tracker demo/wasm].each do |dir|
+    rm_rf File.join(dir, 'zig-out')
+    rm_rf File.join(dir, '.zig-cache')
+  end
 end
 
 desc "cross-compile for every architecture: #{TARGETS.keys.join(', ')}"

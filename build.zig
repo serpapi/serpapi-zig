@@ -99,8 +99,8 @@ pub fn build(b: *std.Build) void {
     const cov_step = b.step("cov", "Measure code coverage with kcov (needs kcov; SERPAPI_KEY for full coverage)");
     cov_step.dependOn(&cov_merge.step);
 
-    // Lint: zig build lint (checks formatting)
-    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench" }, .check = true });
+    // Lint: zig build lint (checks formatting, demos included)
+    const lint = b.addFmt(.{ .paths = &.{ "build.zig", "src", "test", "oobt", "bench", "demo" }, .check = true });
     const lint_step = b.step("lint", "Check code formatting (zig fmt --check)");
     lint_step.dependOn(&lint.step);
 

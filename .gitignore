@@ -4,3 +4,4 @@ zig-cache/
 zig-pkg/
 .DS_Store
 serpapi_zig_*.csv
+.vscode/
