@@ -85,7 +85,10 @@ zig fetch --save 'https://github.com/serpapi/serpapi-zig/archive/refs/tags/v1.1.
 
 Released versions are listed on the
 [releases page](https://github.com/serpapi/serpapi-zig/releases); changes
-are recorded in [CHANGELOG.md](CHANGELOG.md).
+are recorded in [CHANGELOG.md](CHANGELOG.md). The version number lives in
+one place, `build.zig.zon`: `build.zig` forwards it to the library as
+`serpapi.version`, which is what the client reports to serpapi.com, and
+`rake release` reads it to name the tag.
 
 ## Simple Usage
 

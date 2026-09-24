@@ -7,6 +7,9 @@
   agents, via the `output=md` format
 - `serpapi.Error` is exported from the module root
   (`serpapi.Error.SerpApiError`, previously only `serpapi.client.Error`)
+- `serpapi.version` is derived from `build.zig.zon` at build time instead
+  of being duplicated in `src/client.zig`, so the tag cut by `rake release`
+  and the version reported to serpapi.com cannot drift apart
 - Fix: the `timeout` option is enforced. It was accepted and documented
   but never applied, so a stalled connection blocked forever. Each request
   now races a timer on the client's `std.Io.Threaded` pool and is canceled

@@ -11,7 +11,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Library version, reported to the backend through the `source` parameter.
-pub const version = "1.1.0";
+/// Single-sourced from `build.zig.zon` via `build.zig`.
+pub const version: []const u8 = @import("build_options").version;
 
 /// Backend service host.
 pub const backend = "serpapi.com";
@@ -573,6 +574,11 @@ pub const Client = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "version is the semantic version from build.zig.zon" {
+    const parsed = try std.SemanticVersion.parse(version);
+    try testing.expect(parsed.major >= 1);
+}
 
 test "constructor defaults" {
     var client = try Client.init(testing.allocator, .{});

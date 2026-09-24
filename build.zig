@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -10,6 +11,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // The library version reported to serpapi.com comes straight from the
+    // package manifest, so `rake release` and the `source` parameter agree.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", manifest.version);
+    mod.addOptions("build_options", build_options);
 
     // Unit tests: zig build test
     // the name also disambiguates kcov's per-binary report directories
