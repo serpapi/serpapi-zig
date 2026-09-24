@@ -162,7 +162,19 @@ test "invalid api key reports a serpapi error" {
     defer client.deinit();
 
     const result = client.search(.{ .q = "coffee" });
-    try testing.expectError(serpapi.client.Error.SerpApiError, result);
+    try testing.expectError(serpapi.Error.SerpApiError, result);
+    try testing.expect(client.errorMessage() != null);
+}
+
+test "typed decoding reports a serpapi error instead of a parse error" {
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_key", .engine = "google" });
+    defer client.deinit();
+
+    // a struct whose fields are all optional would otherwise decode an
+    // error payload as an empty success
+    const Answer = struct { search_metadata: ?struct { id: []const u8 } = null };
+    const result = client.searchAs(Answer, .{ .q = "coffee" });
+    try testing.expectError(serpapi.Error.SerpApiError, result);
     try testing.expect(client.errorMessage() != null);
 }
 
@@ -174,7 +186,7 @@ test "missing query reports a serpapi error" {
     defer client.deinit();
 
     const result = client.search(.{});
-    try testing.expectError(serpapi.client.Error.SerpApiError, result);
+    try testing.expectError(serpapi.Error.SerpApiError, result);
     const message = client.errorMessage().?;
     try testing.expect(std.ascii.indexOfIgnoreCase(message, "missing query") != null);
 }

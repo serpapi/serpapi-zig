@@ -11,7 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// Library version, reported to the backend through the `source` parameter.
-pub const version = "1.0.0";
+pub const version = "1.1.0";
 
 /// Backend service host.
 pub const backend = "serpapi.com";
@@ -26,12 +26,17 @@ pub const Param = struct {
 
 /// Errors produced by the client itself. Lower-level network / TLS / memory
 /// errors from `std.http` are propagated as-is.
+///
+/// Every variant records details retrievable through `Client.errorMessage()`.
 pub const Error = error{
-    /// serpapi.com replied with an error payload; details in `Client.errorMessage()`.
+    /// serpapi.com replied with an error payload (`{"error": "..."}`),
+    /// whatever the HTTP status and the requested output format.
     SerpApiError,
-    /// HTTP status was not 200 and no error payload was found.
+    /// HTTP status was not 200 and no error payload was found; the message
+    /// holds the raw body, or the status name when the body is empty.
     HttpRequestFailed,
-    /// The response body could not be decoded as JSON.
+    /// The response body could not be decoded as JSON (or into the
+    /// requested type); the message holds the raw body.
     JsonParseError,
 };
 
@@ -53,6 +58,9 @@ pub const Error = error{
 /// var result = try client.search(.{ .q = "coffee" });
 /// defer result.deinit();
 /// ```
+///
+/// A `Client` is not thread-safe: `errorMessage()` reports the last failure
+/// seen by the client, so use one instance per thread.
 pub const Client = struct {
     allocator: Allocator,
     /// Event loop / thread pool backing std.http. Heap-stable inside Client.
@@ -213,7 +221,7 @@ pub const Client = struct {
 
     /// Same as `searchArchive` but decodes the payload into `T`.
     pub fn searchArchiveAs(self: *Client, comptime T: type, search_id: []const u8) !std.json.Parsed(T) {
-        const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.json", .{search_id});
+        const endpoint = try self.archiveEndpoint(search_id, "json");
         defer self.allocator.free(endpoint);
         return self.getJson(T, endpoint, .{}, &.{});
     }
@@ -222,7 +230,7 @@ pub const Client = struct {
     ///
     /// Caller owns the returned slice and must free it.
     pub fn searchArchiveHtml(self: *Client, search_id: []const u8) ![]u8 {
-        const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.html", .{search_id});
+        const endpoint = try self.archiveEndpoint(search_id, "html");
         defer self.allocator.free(endpoint);
         return self.getRaw(endpoint, .{}, &.{});
     }
@@ -231,7 +239,7 @@ pub const Client = struct {
     ///
     /// Caller owns the returned slice and must free it.
     pub fn searchArchiveMd(self: *Client, search_id: []const u8) ![]u8 {
-        const endpoint = try std.fmt.allocPrint(self.allocator, "/searches/{s}.md", .{search_id});
+        const endpoint = try self.archiveEndpoint(search_id, "md");
         defer self.allocator.free(endpoint);
         return self.getRaw(endpoint, .{}, &.{});
     }
@@ -348,6 +356,24 @@ pub const Client = struct {
         }
     }
 
+    /// Build the Search Archive path `/searches/<id>.<format>`, percent-encoding
+    /// the id so it cannot escape the path. Caller owns the result.
+    fn archiveEndpoint(self: *const Client, search_id: []const u8, format: []const u8) Allocator.Error![]u8 {
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer out.deinit();
+
+        // an Allocating writer only ever fails to allocate
+        writeArchiveEndpoint(&out.writer, search_id, format) catch return error.OutOfMemory;
+        return out.toOwnedSlice();
+    }
+
+    fn writeArchiveEndpoint(w: *std.Io.Writer, search_id: []const u8, format: []const u8) std.Io.Writer.Error!void {
+        try w.writeAll("/searches/");
+        try std.Uri.Component.percentEncode(w, search_id, isUrlSafe);
+        try w.writeByte('.');
+        try w.writeAll(format);
+    }
+
     /// Build the full request URL: https://serpapi.com<endpoint>?<query>.
     /// Precedence: call `params`, then `extra`, then constructor defaults.
     fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param) Allocator.Error![]u8 {
@@ -410,9 +436,11 @@ pub const Client = struct {
         };
     }
 
+    const Response = struct { body: []u8, status: std.http.Status };
+
     /// Perform an HTTP GET request against the backend and return the raw
     /// body (caller owns) along with the HTTP status.
-    fn get(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) !struct { body: []u8, status: std.http.Status } {
+    fn get(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) !Response {
         const url = try self.buildUrl(self.allocator, endpoint, params, extra);
         defer self.allocator.free(url);
 
@@ -432,11 +460,7 @@ pub const Client = struct {
         const response = try self.get(endpoint, params, extra);
         defer self.allocator.free(response.body);
 
-        // serpapi.com reports failures as an `error` field in the payload.
-        if (response.status != .ok) {
-            try self.captureError(response.body, @tagName(response.status));
-            return Error.SerpApiError;
-        }
+        try self.checkResponse(response.body, response.status);
 
         const parsed = std.json.parseFromSlice(T, self.allocator, response.body, .{
             .allocate = .alloc_always,
@@ -445,43 +469,48 @@ pub const Client = struct {
             try self.setLastError(response.body);
             return Error.JsonParseError;
         };
-        errdefer parsed.deinit();
-
-        if (T == std.json.Value) {
-            if (errorField(parsed.value)) |message| {
-                try self.setLastError(message);
-                return Error.SerpApiError;
-            }
-        }
         return parsed;
-    }
-
-    /// Extract the backend `error` message from an error payload; fall back
-    /// to the given default (typically the HTTP status name).
-    fn captureError(self: *Client, body: []const u8, fallback: []const u8) !void {
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
-            return self.setLastError(if (body.len > 0) body else fallback);
-        };
-        defer parsed.deinit();
-        try self.setLastError(errorField(parsed.value) orelse fallback);
-    }
-
-    fn errorField(value: std.json.Value) ?[]const u8 {
-        if (value != .object) return null;
-        const error_value = value.object.get("error") orelse return null;
-        if (error_value != .string) return null;
-        return error_value.string;
     }
 
     fn getRaw(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) ![]u8 {
         const response = try self.get(endpoint, params, extra);
         errdefer self.allocator.free(response.body);
 
-        if (response.status != .ok) {
-            try self.captureError(response.body, @tagName(response.status));
+        try self.checkResponse(response.body, response.status);
+        return response.body;
+    }
+
+    /// Apply the error rule shared by every decoder, recording the details
+    /// for `errorMessage`:
+    ///  * an `{"error": "..."}` payload is `SerpApiError`, whatever the
+    ///    HTTP status (serpapi.com uses 200 as well as 4xx for these);
+    ///  * otherwise a non-200 status is `HttpRequestFailed`.
+    fn checkResponse(self: *Client, body: []const u8, status: std.http.Status) !void {
+        if (try self.captureErrorPayload(body)) return Error.SerpApiError;
+        if (status != .ok) {
+            try self.setLastError(if (body.len > 0) body else @tagName(status));
             return Error.HttpRequestFailed;
         }
-        return response.body;
+    }
+
+    /// Top-level shape of a serpapi.com error payload. Success payloads
+    /// parse too (every other field is skipped) and leave `error` null.
+    const ErrorPayload = struct { @"error": ?[]const u8 = null };
+
+    /// If `body` is a JSON object carrying a string `error` field, store the
+    /// message as the last error and return true. Anything else (HTML,
+    /// Markdown, a JSON array, an object without `error`) returns false.
+    fn captureErrorPayload(self: *Client, body: []const u8) !bool {
+        const parsed = std.json.parseFromSlice(ErrorPayload, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return false,
+        };
+        defer parsed.deinit();
+        const message = parsed.value.@"error" orelse return false;
+        try self.setLastError(message);
+        return true;
     }
 };
 
@@ -669,22 +698,93 @@ test "error reporting cleans up on allocation failure" {
             var client = try Client.init(allocator, .{});
             defer client.deinit();
 
-            try client.captureError("{\"error\":\"Missing query `q` parameter.\"}", "bad_request");
-            try client.captureError("not json at all", "bad_request");
+            // the injected OutOfMemory must propagate, so match the expected
+            // errors by hand rather than through expectError
+            client.checkResponse("{\"error\":\"Missing query `q` parameter.\"}", .bad_request) catch |err| switch (err) {
+                Error.SerpApiError => {},
+                else => return err,
+            };
+            client.checkResponse("not json at all", .bad_request) catch |err| switch (err) {
+                Error.HttpRequestFailed => {},
+                else => return err,
+            };
+            try client.checkResponse("{\"search_metadata\":{\"id\":\"1\"}}", .ok);
         }
     }.run, .{});
 }
 
-test "captureError extracts the backend error field" {
+test "checkResponse reports an error payload whatever the status" {
     var client = try Client.init(testing.allocator, .{});
     defer client.deinit();
 
-    try client.captureError("{\"error\":\"Missing query `q` parameter.\"}", "bad_request");
+    const payload = "{\"error\":\"Missing query `q` parameter.\"}";
+    try testing.expectError(Error.SerpApiError, client.checkResponse(payload, .bad_request));
     try testing.expectEqualStrings("Missing query `q` parameter.", client.errorMessage().?);
 
-    try client.captureError("not json at all", "bad_request");
+    // serpapi.com sometimes answers 200 with an error payload
+    try testing.expectError(Error.SerpApiError, client.checkResponse(payload, .ok));
+    try testing.expectEqualStrings("Missing query `q` parameter.", client.errorMessage().?);
+
+    // the error field is found even when other fields precede it
+    try testing.expectError(Error.SerpApiError, client.checkResponse(
+        "{\"search_metadata\":{\"status\":\"Error\"},\"error\":\"Google hasn't returned any results for this query.\"}",
+        .ok,
+    ));
+    try testing.expectEqualStrings("Google hasn't returned any results for this query.", client.errorMessage().?);
+}
+
+test "checkResponse reports a non-200 status without an error payload" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("not json at all", .bad_request));
     try testing.expectEqualStrings("not json at all", client.errorMessage().?);
 
-    try client.captureError("", "bad_request");
-    try testing.expectEqualStrings("bad_request", client.errorMessage().?);
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("<html>Bad Gateway</html>", .bad_gateway));
+    try testing.expectEqualStrings("<html>Bad Gateway</html>", client.errorMessage().?);
+
+    // an empty body falls back to the status name
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("", .internal_server_error));
+    try testing.expectEqualStrings("internal_server_error", client.errorMessage().?);
+
+    // a non-string error field is not a serpapi error payload
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("{\"error\":{\"code\":1}}", .bad_request));
+    try testing.expectEqualStrings("{\"error\":{\"code\":1}}", client.errorMessage().?);
+}
+
+test "checkResponse accepts successful payloads of every format" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try client.checkResponse("{\"search_metadata\":{\"id\":\"1\"},\"organic_results\":[]}", .ok);
+    try client.checkResponse("[{\"id\":1,\"name\":\"Austin, TX\"}]", .ok);
+    try client.checkResponse("<!DOCTYPE html><html></html>", .ok);
+    try client.checkResponse("# coffee\n\n- [Coffee](https://example.com)\n", .ok);
+    try client.checkResponse("", .ok);
+    try testing.expectEqual(@as(?[]const u8, null), client.errorMessage());
+}
+
+test "archiveEndpoint percent-encodes the search id" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const plain = try client.archiveEndpoint("68a0d7f2c3b1a9e4f5d6c7b8", "json");
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings("/searches/68a0d7f2c3b1a9e4f5d6c7b8.json", plain);
+
+    const hostile = try client.archiveEndpoint("../account?x=1#f", "html");
+    defer testing.allocator.free(hostile);
+    try testing.expectEqualStrings("/searches/..%2Faccount%3Fx%3D1%23f.html", hostile);
+}
+
+test "archiveEndpoint cleans up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator) !void {
+            var client = try Client.init(allocator, .{});
+            defer client.deinit();
+
+            const endpoint = try client.archiveEndpoint("abc/def", "md");
+            allocator.free(endpoint);
+        }
+    }.run, .{});
 }

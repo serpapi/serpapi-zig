@@ -11,6 +11,7 @@ pub const client = @import("client.zig");
 pub const version = client.version;
 pub const Client = client.Client;
 pub const Param = client.Param;
+pub const Error = client.Error;
 
 test {
     std.testing.refAllDecls(@This());
