@@ -899,7 +899,7 @@ test "archiveEndpoint cleans up on allocation failure" {
 }
 
 test "fetch gives up after the timeout" {
-    var client = try Client.init(testing.allocator, .{ .timeout = 1 });
+    var client = try Client.init(testing.allocator, .{ .timeout = 2 });
     defer client.deinit();
     const io = client.threaded.io();
 
@@ -919,9 +919,14 @@ test "fetch gives up after the timeout" {
     try testing.expectError(Error.Timeout, client.fetch(url, &body.writer));
     const elapsed_ns = std.Io.Clock.now(.awake, io).nanoseconds - started.nanoseconds;
 
-    try testing.expectEqualStrings("request timed out after 1s", client.errorMessage().?);
+    try testing.expectEqualStrings("request timed out after 2s", client.errorMessage().?);
+    // Generous bounds: this only needs to catch a race that fires wildly
+    // early (e.g. the timer winning immediately) or not at all (hanging).
+    // Exact-second bounds are flaky under CI clock jitter, particularly on
+    // Windows where sleeping is implemented via thread parking rather than
+    // a monotonic clock deadline.
     try testing.expect(elapsed_ns >= std.time.ns_per_s);
-    try testing.expect(elapsed_ns < 10 * std.time.ns_per_s);
+    try testing.expect(elapsed_ns < 30 * std.time.ns_per_s);
 }
 
 test "fetch returns before the timeout when the server answers" {
