@@ -1,6 +1,6 @@
 //! Benchmark: SerpApi client with and without persistent connection.
 //!
-//! Demonstrates that persistent (keep-alive) connections are ~2x quicker
+//! Demonstrates that persistent (keep-alive) connections are ~3-4x quicker
 //! than reconnecting for every request, by timing sequential searches.
 //! Results are printed and appended to a CSV file:
 //!   serpapi_zig_<zig_version>_<timestamp>.csv

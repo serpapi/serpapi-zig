@@ -13,7 +13,7 @@ SerpApi supports Google, Google Maps, Google Shopping, Baidu, Yandex, Yahoo, eBa
 Query a vast range of data at scale, including web search results, flight schedules, stock market data, news headlines, and [more](https://serpapi.com).
 
 ## Features
-  * `persistent` → Keep socket connection open to save on SSL handshake / reconnection (2x faster).
+  * `persistent` → Keep socket connection open to save on SSL handshake / reconnection (3-4x faster on repeated searches).
   * `md` → Markdown output, token-efficient and ready to feed to LLMs and AI agents. [Search API — Markdown](#search-api--markdown)
   * zero dependency → only the Zig standard library (`std.http`, `std.json`), nothing else to fetch.
   * cross platform → Linux, macOS, and Windows.
@@ -317,8 +317,10 @@ var results = try client.searchArchive(search_id);
 ## Search at scale
 
 With `persistent = true` (the default), the client keeps the TLS connection
-to serpapi.com open between requests, which roughly doubles throughput on
-repeated searches (measure it yourself with `zig build bench`):
+to serpapi.com open between requests, skipping the TCP + TLS handshake on
+every search after the first. On repeated searches this is 3-4x faster than
+reconnecting (10 sequential searches: ~0.5-1.0s persistent vs ~2.2s not;
+measure it yourself with `zig build bench`):
 
 ```zig
 for (queries) |query| {

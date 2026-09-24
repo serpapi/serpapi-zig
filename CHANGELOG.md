@@ -10,6 +10,13 @@
 - `serpapi.version` is derived from `build.zig.zon` at build time instead
   of being duplicated in `src/client.zig`, so the tag cut by `rake release`
   and the version reported to serpapi.com cannot drift apart
+- Fix: persistent connections are actually reused. `std.http.Client.fetch`
+  leaves the terminating chunk of a compressed, chunked response unread,
+  so it judged every serpapi.com body unfinished and closed the socket:
+  `persistent = true` was silently a no-op and each request paid for a new
+  TLS handshake. The client now drives the request itself and drains the
+  framing; `zig build bench` goes from ~2.4s to ~0.5-1.0s for 10 searches
+  (3-4x), where before persistent and non-persistent were within noise
 - Fix: the `timeout` option is enforced. It was accepted and documented
   but never applied, so a stalled connection blocked forever. Each request
   now races a timer on the client's `std.Io.Threaded` pool and is canceled
