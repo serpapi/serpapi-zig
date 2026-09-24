@@ -26,7 +26,7 @@ Zig 0.16.0 or higher is required.
 Add the dependency to your project:
 
 ```bash
-zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.1.0'
 ```
 
 Then wire the module in your `build.zig`:
@@ -49,7 +49,7 @@ selects which one you get:
 
 ```bash
 # a released version (recommended)
-zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.0.0'
+zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#v1.1.0'
 
 # the development branch — moves, may break
 zig fetch --save 'git+https://github.com/serpapi/serpapi-zig'
@@ -60,7 +60,7 @@ zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#4451c6c4b5a2dc68d72
 
 Whichever form you use, `--save` resolves it at fetch time and records the
 result as an immutable pin, so a tag that is later moved cannot change your
-build:
+build. Pinning `v1.0.0`, for instance, produced:
 
 ```zig
 .dependencies = .{
@@ -80,7 +80,7 @@ resolves to the old package, and the build quietly keeps using it.
 A release tarball works too, and produces the same hash as its tag:
 
 ```bash
-zig fetch --save 'https://github.com/serpapi/serpapi-zig/archive/refs/tags/v1.0.0.tar.gz'
+zig fetch --save 'https://github.com/serpapi/serpapi-zig/archive/refs/tags/v1.1.0.tar.gz'
 ```
 
 Released versions are listed on the
@@ -264,7 +264,8 @@ doc: [serpapi.com/account-api](https://serpapi.com/account-api)
 
 ## Error handling
 
-Methods return a Zig error union. When serpapi.com reports a failure, the
+Methods return a Zig error union. When serpapi.com reports a failure — an
+`{"error": "..."}` payload, whatever the HTTP status or output format — the
 call returns `error.SerpApiError` and the backend message is available from
 `client.errorMessage()`:
 
@@ -278,9 +279,15 @@ const results = client.search(.{}) catch |err| switch (err) {
 };
 ```
 
-Other errors: `error.HttpRequestFailed` (non-200 status without an error
-payload), `error.JsonParseError` (response was not valid JSON), plus any
-network / TLS / allocation errors propagated from the standard library.
+Other errors, all with details in `client.errorMessage()`:
+`error.HttpRequestFailed` (non-200 status without an error payload — the
+message is the raw body, or the status name when the body is empty),
+`error.JsonParseError` (response was not valid JSON, or did not fit the
+requested type), plus any network / TLS / allocation errors propagated from
+the standard library. The three client errors are grouped in `serpapi.Error`.
+
+A `Client` is not thread-safe — `errorMessage()` reports the last failure seen
+by that instance — so use one client per thread.
 
 ## Search asynchronous
 
@@ -317,8 +324,16 @@ zig build itest   # run integration tests against serpapi.com (needs SERPAPI_KEY
 zig build oobt    # out-of-box testing: build + run the demo app (needs SERPAPI_KEY)
 zig build bench   # benchmark persistent vs non-persistent connections (needs SERPAPI_KEY)
 zig build cov     # measure code coverage (needs kcov + SERPAPI_KEY)
-zig build lint    # check formatting (zig fmt --check)
+zig build lint    # check formatting (zig fmt --check), demos included
 zig build doc     # generate API documentation under zig-out/docs
+```
+
+The two demos are standalone projects; build them from the repo root with
+`--build-file` (or `rake demos`):
+
+```bash
+zig build --build-file demo/flight_tracker/build.zig
+zig build test --build-file demo/wasm/build.zig
 ```
 
 A `Rakefile` wraps the same steps for anyone used to the other SerpApi
