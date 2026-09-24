@@ -7,6 +7,10 @@
   agents, via the `output=md` format
 - `serpapi.Error` is exported from the module root
   (`serpapi.Error.SerpApiError`, previously only `serpapi.client.Error`)
+- Fix: the `timeout` option is enforced. It was accepted and documented
+  but never applied, so a stalled connection blocked forever. Each request
+  now races a timer on the client's `std.Io.Threaded` pool and is canceled
+  when it fires, returning `error.Timeout`; `0` disables the limit
 - Browser wasm demo (`demo/wasm`): a `wasm32-freestanding` module for
   request building and JSON parsing, served by a native proxy
   (`zig build serve`) that keeps `SERPAPI_KEY` off the browser

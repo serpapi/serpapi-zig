@@ -165,6 +165,14 @@ All fields are optional. Parameters passed to a method call override the
 defaults provided to the constructor. Call `client.deinit()` when the client
 is no longer needed; it closes the connection and frees all resources.
 
+`timeout` bounds the whole request — connecting, TLS handshake, and reading
+the response — and a request that overruns it fails with `error.Timeout`
+(details in `client.errorMessage()`), dropping the stalled connection so the
+next request starts fresh. Set it to `0` to wait indefinitely. The request
+runs on a worker thread from the client's own `std.Io.Threaded` pool so it
+can be interrupted; in a single-threaded build the limit is not enforced and
+the request simply runs to completion.
+
 ## APIs
 
 ### Search API
@@ -283,8 +291,9 @@ Other errors, all with details in `client.errorMessage()`:
 `error.HttpRequestFailed` (non-200 status without an error payload — the
 message is the raw body, or the status name when the body is empty),
 `error.JsonParseError` (response was not valid JSON, or did not fit the
-requested type), plus any network / TLS / allocation errors propagated from
-the standard library. The three client errors are grouped in `serpapi.Error`.
+requested type), `error.Timeout` (the request overran the client's `timeout`),
+plus any network / TLS / allocation errors propagated from the standard
+library. The four client errors are grouped in `serpapi.Error`.
 
 A `Client` is not thread-safe — `errorMessage()` reports the last failure seen
 by that instance — so use one client per thread.

@@ -38,6 +38,9 @@ pub const Error = error{
     /// The response body could not be decoded as JSON (or into the
     /// requested type); the message holds the raw body.
     JsonParseError,
+    /// The request did not complete within `timeout` seconds. The connection
+    /// is dropped; the next request opens a fresh one.
+    Timeout,
 };
 
 /// Client for SerpApi.com.
@@ -68,7 +71,7 @@ pub const Client = struct {
     http: std.http.Client,
     /// Default query parameters applied to every request (owned copies).
     params: std.array_list.Managed(Param),
-    /// HTTP request timeout in seconds [default: 120].
+    /// HTTP request timeout in seconds, 0 to wait forever [default: 120].
     timeout: u32,
     /// Keep the connection open between requests (2x faster). [default: true]
     persistent: bool,
@@ -83,7 +86,9 @@ pub const Client = struct {
     /// released with `deinit`.
     ///
     /// `options` is an anonymous struct. Two fields configure the client:
-    ///  * `timeout`: HTTP request max timeout in seconds [default: 120s == 2m]
+    ///  * `timeout`: HTTP request max timeout in seconds [default: 120s == 2m].
+    ///    Covers the whole request, from connecting to the last body byte;
+    ///    an overrun returns `error.Timeout`. 0 disables the limit.
     ///  * `persistent`: keep the socket open to save on SSL handshake /
     ///    reconnection (2x faster) [default: true]
     ///
@@ -447,13 +452,62 @@ pub const Client = struct {
         var body: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body.deinit();
 
-        const result = try self.http.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &body.writer,
-            .keep_alive = self.persistent,
-        });
+        const status = try self.fetch(url, &body.writer);
+        return .{ .body = try body.toOwnedSlice(), .status = status };
+    }
 
-        return .{ .body = try body.toOwnedSlice(), .status = result.status };
+    /// Outcome of racing the request against the timeout timer.
+    const Race = union(enum) {
+        request: std.http.Client.FetchError!std.http.Status,
+        timer: std.Io.Cancelable!void,
+    };
+
+    /// Issue the GET request, writing the body to `w`. When `timeout` is
+    /// non-zero the request runs on its own thread and is canceled once the
+    /// timer fires, so a stalled connection cannot block the caller forever.
+    fn fetch(self: *Client, url: []const u8, w: *std.Io.Writer) !std.http.Status {
+        if (self.timeout == 0) return fetchStatus(&self.http, url, w, self.persistent);
+
+        const io = self.threaded.io();
+        var buffer: [2]Race = undefined;
+        var race: std.Io.Select(Race) = .init(io, &buffer);
+        // cancels the loser and waits for it to finish, so `w` is quiescent
+        // by the time the caller reads it
+        defer race.cancelDiscard();
+
+        const deadline: std.Io.Timeout = .{ .duration = .{
+            .raw = .fromSeconds(self.timeout),
+            .clock = .awake,
+        } };
+        // Both tasks need their own unit of concurrency: run inline, the
+        // timer would block for the whole timeout and the request could not
+        // be interrupted. Without concurrency (single-threaded builds),
+        // fall back to an unbounded request rather than fail.
+        race.concurrent(.timer, std.Io.Timeout.sleep, .{ deadline, io }) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return fetchStatus(&self.http, url, w, self.persistent),
+        };
+        race.concurrent(.request, fetchStatus, .{ &self.http, url, w, self.persistent }) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return fetchStatus(&self.http, url, w, self.persistent),
+        };
+
+        switch (try race.await()) {
+            .request => |status| return status,
+            .timer => {
+                const message = try std.fmt.allocPrint(self.allocator, "request timed out after {d}s", .{self.timeout});
+                defer self.allocator.free(message);
+                try self.setLastError(message);
+                return Error.Timeout;
+            },
+        }
+    }
+
+    fn fetchStatus(http: *std.http.Client, url: []const u8, w: *std.Io.Writer, keep_alive: bool) std.http.Client.FetchError!std.http.Status {
+        const result = try http.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = w,
+            .keep_alive = keep_alive,
+        });
+        return result.status;
     }
 
     fn getJson(self: *Client, comptime T: type, endpoint: []const u8, params: anytype, extra: []const Param) !std.json.Parsed(T) {
@@ -787,4 +841,72 @@ test "archiveEndpoint cleans up on allocation failure" {
             allocator.free(endpoint);
         }
     }.run, .{});
+}
+
+test "fetch gives up after the timeout" {
+    var client = try Client.init(testing.allocator, .{ .timeout = 1 });
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    // The kernel completes the TCP handshake on our behalf, but nobody ever
+    // accepts or answers, so the request stalls waiting for the response.
+    const loopback: std.Io.net.IpAddress = try .parseIp4("127.0.0.1", 0);
+    var server = try loopback.listen(io, .{});
+    defer server.deinit(io);
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/search", .{server.socket.address.getPort()});
+    defer testing.allocator.free(url);
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+
+    const started = std.Io.Clock.now(.awake, io);
+    try testing.expectError(Error.Timeout, client.fetch(url, &body.writer));
+    const elapsed_ns = std.Io.Clock.now(.awake, io).nanoseconds - started.nanoseconds;
+
+    try testing.expectEqualStrings("request timed out after 1s", client.errorMessage().?);
+    try testing.expect(elapsed_ns >= std.time.ns_per_s);
+    try testing.expect(elapsed_ns < 10 * std.time.ns_per_s);
+}
+
+test "fetch returns before the timeout when the server answers" {
+    var client = try Client.init(testing.allocator, .{ .timeout = 30 });
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    const loopback: std.Io.net.IpAddress = try .parseIp4("127.0.0.1", 0);
+    var server = try loopback.listen(io, .{});
+    defer server.deinit(io);
+
+    const Answer = struct {
+        fn serve(server_ptr: *std.Io.net.Server, server_io: std.Io) !void {
+            var stream = try server_ptr.accept(server_io);
+            defer stream.close(server_io);
+            var read_buffer: [4096]u8 = undefined;
+            var reader = stream.reader(server_io, &read_buffer);
+            // consume the request head
+            _ = try reader.interface.discardDelimiterInclusive('\n');
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (line.len <= 2) break;
+            }
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(server_io, &write_buffer);
+            try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"ok\":true}\n");
+            try writer.interface.flush();
+        }
+    };
+    var answer = try io.concurrent(Answer.serve, .{ &server, io });
+    defer _ = answer.cancel(io) catch {};
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/search", .{server.socket.address.getPort()});
+    defer testing.allocator.free(url);
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+
+    const status = try client.fetch(url, &body.writer);
+    try testing.expectEqual(std.http.Status.ok, status);
+    try testing.expectEqualStrings("{\"ok\":true}\n", body.written());
+    try answer.await(io);
 }
