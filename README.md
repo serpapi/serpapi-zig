@@ -60,13 +60,13 @@ zig fetch --save 'git+https://github.com/serpapi/serpapi-zig#4451c6c4b5a2dc68d72
 
 Whichever form you use, `--save` resolves it at fetch time and records the
 result as an immutable pin, so a tag that is later moved cannot change your
-build. Pinning `v1.0.0`, for instance, produced:
+build. Pinning `v1.1.0`, for instance, produced:
 
 ```zig
 .dependencies = .{
     .serpapi = .{
-        .url = "git+https://github.com/serpapi/serpapi-zig?ref=v1.0.0#b7b6dbd303fb36b3331fc8265bc28925ba4ca2a5",
-        .hash = "serpapi-1.0.0-PYmxE0B-AABZru95tORJSVF468kIbL_5Ri3-JC6bZBxT",
+        .url = "git+https://github.com/serpapi/serpapi-zig?ref=v1.1.0#2cdc4e1c8af19139d1c92678c827238712ed8e70",
+        .hash = "serpapi-1.1.0-PYmxE5oUAQAIGYd_5Z3eHW6qKfMiekEOF0zNe32ZVamE",
     },
 },
 ```
