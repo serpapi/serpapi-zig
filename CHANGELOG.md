@@ -11,11 +11,18 @@
   (`abcd****wxyz`, `****` for a key of eight characters or fewer)
 - README documents `engine()`, `apiKey()` and `serpapi.version`
 - `rake release` runs `lint`, `test`, `itest` and `oobt` before tagging,
-  and refuses to start unless `SERPAPI_KEY` is set and `git status
-  --porcelain` is empty (the previous `git diff --quiet` missed staged and
-  untracked files)
+  and refuses to start unless it runs from `master` with `SERPAPI_KEY` set
+  and an empty `git status --porcelain` (the previous `git diff --quiet`
+  missed staged and untracked files)
 
 ### Behavior changes
+
+- `errorMessage()` and `lastError()` describe the most recent request only:
+  every request clears the previous failure, so they return null after a
+  success or a transport error. Previously the last failure lingered, and a
+  DNS error after a 404 still reported the 404
+
+### Breaking changes
 
 - The API key is no longer kept in `Client.params`: it moved to its own
   `api_key` field, which `{any}` prints as an address, so dumping the

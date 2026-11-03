@@ -128,8 +128,13 @@ namespace :install do
 end
 
 namespace :release do
-  desc 'fail fast unless the working tree is clean and SERPAPI_KEY is set'
+  desc 'fail fast unless on a clean master with SERPAPI_KEY set'
   task :preflight do
+    # release pushes master and the tag, so it must run from master
+    branch = `git rev-parse --abbrev-ref HEAD`.strip
+    raise 'git rev-parse failed' unless $?.success?
+    raise "release runs from master, not #{branch}" unless branch == 'master'
+
     # `git diff --quiet` misses staged and untracked files; porcelain lists all
     dirty = `git status --porcelain`
     raise 'git status failed' unless $?.success?

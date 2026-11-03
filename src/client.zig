@@ -45,8 +45,12 @@ pub const Error = error{
 };
 
 /// Details of the last failed request, from `Client.lastError()`. The
-/// strings are owned by the client and valid until its next failure or
+/// strings are owned by the client and valid until its next request or
 /// `deinit`.
+///
+/// Every request starts by clearing it, so it only ever describes the most
+/// recent call: it is null after a success, and after a transport error
+/// (DNS, connection, TLS), which carries no details beyond the Zig error.
 pub const ErrorInfo = struct {
     /// What went wrong; the same text as `Client.errorMessage()`.
     message: []const u8,
@@ -102,8 +106,8 @@ const Secret = struct {
 /// defer result.deinit();
 /// ```
 ///
-/// A `Client` is not thread-safe: `errorMessage()` reports the last failure
-/// seen by the client, so use one instance per thread.
+/// A `Client` is not thread-safe: `errorMessage()` and `lastError()` report
+/// the last failure seen by the client, so use one instance per thread.
 pub const Client = struct {
     allocator: Allocator,
     /// Event loop / thread pool backing std.http. Heap-stable inside Client.
@@ -329,17 +333,19 @@ pub const Client = struct {
         return key.reveal();
     }
 
-    /// Description of the last failed request, if any: the error payload
-    /// from serpapi.com, the raw body of a non-200 response, or the client's
-    /// own message. See `lastError` for the HTTP status, URL and search id.
+    /// Description of the most recent request's failure, if any: the error
+    /// payload from serpapi.com, the raw body of a non-200 response, or the
+    /// client's own message. Null after a success or a transport error. See
+    /// `lastError` for the HTTP status, URL and search id.
     pub fn errorMessage(self: *const Client) ?[]const u8 {
         const info = self.last_error orelse return null;
         return info.message;
     }
 
-    /// Details of the last failed request, if any: message, HTTP status,
-    /// URL without the api_key, and search id. Mirrors the fields of
-    /// serpapi-ruby's `SerpApiError`.
+    /// Details of the most recent request's failure, if any: message, HTTP
+    /// status, URL without the api_key, and search id. Mirrors the fields of
+    /// serpapi-ruby's `SerpApiError`. Null after a success or a transport
+    /// error, see `ErrorInfo`.
     ///
     /// ```zig
     /// var results = client.search(.{ .q = "coffee" }) catch |err| {
@@ -459,10 +465,11 @@ pub const Client = struct {
     /// Attach the URL of the request that just failed to the last error,
     /// leaving out the api_key.
     fn recordUrl(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) Allocator.Error!void {
-        const info = &(self.last_error orelse return);
-        const url = try self.buildUrlWith(self.allocator, endpoint, params, extra, .omit);
-        if (info.url) |old| self.allocator.free(old);
-        info.url = url;
+        if (self.last_error) |*info| {
+            const url = try self.buildUrlWith(self.allocator, endpoint, params, extra, .omit);
+            if (info.url) |old| self.allocator.free(old);
+            info.url = url;
+        }
     }
 
     /// Write one query parameter value, percent-encoding strings and
@@ -598,7 +605,11 @@ pub const Client = struct {
     /// Issue the GET request, writing the body to `w`. When `timeout` is
     /// non-zero the request runs on its own thread and is canceled once the
     /// timer fires, so a stalled connection cannot block the caller forever.
+    ///
+    /// Every request goes through here, so this is where the previous
+    /// call's failure is forgotten: `lastError()` describes this call only.
     fn fetch(self: *Client, url: []const u8, w: *std.Io.Writer) !std.http.Status {
+        self.clearLastError();
         if (self.timeout == 0) return fetchStatus(&self.http, url, w, self.persistent);
 
         const io = self.threaded.io();
@@ -1325,4 +1336,59 @@ test "failure details clean up on allocation failure" {
             };
         }
     }.run, .{});
+}
+
+test "lastError only describes the most recent request" {
+    var client = try Client.init(testing.allocator, .{ .timeout = 30 });
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    const loopback: std.Io.net.IpAddress = try .parseIp4("127.0.0.1", 0);
+    var server = try loopback.listen(io, .{});
+    var listening = true;
+    defer if (listening) server.deinit(io);
+
+    const Answer = struct {
+        fn serve(server_ptr: *std.Io.net.Server, server_io: std.Io) !void {
+            var stream = try server_ptr.accept(server_io);
+            defer stream.close(server_io);
+            var read_buffer: [4096]u8 = undefined;
+            var reader = stream.reader(server_io, &read_buffer);
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (line.len <= 2) break;
+            }
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(server_io, &write_buffer);
+            try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            try writer.interface.flush();
+        }
+    };
+    var answer = try io.concurrent(Answer.serve, .{ &server, io });
+    defer _ = answer.cancel(io) catch {};
+
+    const port = server.socket.address.getPort();
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/search", .{port});
+    defer testing.allocator.free(url);
+
+    // a 404 is recorded...
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("Not Found", .not_found));
+    try client.recordUrl("/search", .{ .q = "coffee" }, &.{});
+    try testing.expectEqual(std.http.Status.not_found, client.lastError().?.status.?);
+
+    // ...and forgotten as soon as the next request starts
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try testing.expectEqual(std.http.Status.ok, try client.fetch(url, &body.writer));
+    try answer.await(io);
+    try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
+    try testing.expectEqual(@as(?[]const u8, null), client.errorMessage());
+
+    // a transport error leaves nothing behind either, not the older 404
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("Not Found", .not_found));
+    server.deinit(io); // nobody listens on the port any more
+    listening = false;
+    body.clearRetainingCapacity();
+    try testing.expectError(error.ConnectionRefused, client.fetch(url, &body.writer));
+    try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
 }

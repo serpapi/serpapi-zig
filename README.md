@@ -324,6 +324,10 @@ HTTP `status`, the request `url` with the `api_key` left out — safe to log —
 and the `search_id` when serpapi.com assigned one to the failed search.
 `status` is null when no response arrived (`error.Timeout`).
 
+Both describe the most recent request only: every request clears them
+first, so they are null after a success, and after a transport error (DNS,
+connection, TLS) — such errors carry no details beyond the Zig error itself.
+
 ```zig
 var archived = client.searchArchive(search_id) catch |err| {
     if (client.lastError()) |info| {
