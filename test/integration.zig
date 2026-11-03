@@ -5,7 +5,7 @@
 //!  * location API (persistent and non-persistent connections)
 //!  * account API
 //!  * search archive API
-//!  * error reporting on invalid input
+//!  * error reporting on invalid input (message, HTTP status, key-free URL)
 //!
 //! Tests that need an API key read the SERPAPI_KEY environment variable
 //! and are skipped otherwise (e.g. `SERPAPI_KEY=secret zig build itest`).
@@ -157,6 +157,47 @@ test "search archive returns a past search" {
     try testing.expectEqualStrings(search_id, archived_id);
 }
 
+test "search archive returns a past search as html, markdown, and typed results" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google" });
+    defer client.deinit();
+
+    const Metadata = struct { search_metadata: struct { id: []const u8, status: []const u8 } };
+    var original = try client.searchAs(Metadata, .{ .q = "coffee" });
+    defer original.deinit();
+    const search_id = original.value.search_metadata.id;
+
+    var archived = try client.searchArchiveAs(Metadata, search_id);
+    defer archived.deinit();
+    try testing.expectEqualStrings(search_id, archived.value.search_metadata.id);
+    try testing.expectEqualStrings("Success", archived.value.search_metadata.status);
+
+    const page = try client.searchArchiveHtml(search_id);
+    defer testing.allocator.free(page);
+    try testing.expect(std.ascii.indexOfIgnoreCase(page, "<html") != null);
+
+    const markdown = try client.searchArchiveMd(search_id);
+    defer testing.allocator.free(markdown);
+    try testing.expect(markdown.len > 0);
+    try testing.expect(std.ascii.indexOfIgnoreCase(markdown, "<html") == null);
+}
+
+test "locationAs decodes locations into typed structs" {
+    var client = try serpapi.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const Location = struct { name: []const u8, canonical_name: []const u8, target_type: []const u8 };
+    var result = try client.locationAs([]const Location, .{ .q = "Austin", .limit = 3 });
+    defer result.deinit();
+
+    try testing.expect(result.value.len > 0);
+    try testing.expect(result.value.len <= 3);
+    try testing.expect(std.mem.startsWith(u8, result.value[0].name, "Austin"));
+    try testing.expect(result.value[0].canonical_name.len > 0);
+}
+
 test "invalid api key reports a serpapi error" {
     var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_key", .engine = "google" });
     defer client.deinit();
@@ -164,6 +205,42 @@ test "invalid api key reports a serpapi error" {
     const result = client.search(.{ .q = "coffee" });
     try testing.expectError(serpapi.Error.SerpApiError, result);
     try testing.expect(client.errorMessage() != null);
+}
+
+test "lastError reports the status and a key-free url" {
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_key_0123456789", .engine = "google" });
+    defer client.deinit();
+
+    try testing.expectError(serpapi.Error.SerpApiError, client.search(.{ .q = "coffee" }));
+    const info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.unauthorized, info.status.?);
+    try testing.expectEqualStrings(client.errorMessage().?, info.message);
+    try testing.expect(std.mem.startsWith(u8, info.url.?, "https://serpapi.com/search?q=coffee&"));
+    try testing.expect(std.mem.indexOf(u8, info.url.?, "api_key") == null);
+    try testing.expect(std.mem.indexOf(u8, info.url.?, "invalid_key_0123456789") == null);
+    try testing.expect(std.mem.indexOf(u8, info.message, "invalid_key_0123456789") == null);
+
+    // the client prints with its key masked
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try out.writer.print("{f}", .{client});
+    try testing.expect(std.mem.indexOf(u8, out.written(), "invalid_key_0123456789") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "inva****6789") != null);
+}
+
+test "lastError reports a 404 from the search archive" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key });
+    defer client.deinit();
+
+    try testing.expectError(serpapi.Error.SerpApiError, client.searchArchive("0000000000000000000000ff"));
+    const info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.not_found, info.status.?);
+    try testing.expectEqualStrings("Search not found.", info.message);
+    try testing.expect(std.mem.startsWith(u8, info.url.?, "https://serpapi.com/searches/0000000000000000000000ff.json"));
+    try testing.expect(std.mem.indexOf(u8, info.url.?, key) == null);
 }
 
 test "typed decoding reports a serpapi error instead of a parse error" {

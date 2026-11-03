@@ -44,6 +44,45 @@ pub const Error = error{
     Timeout,
 };
 
+/// Details of the last failed request, from `Client.lastError()`. The
+/// strings are owned by the client and valid until its next failure or
+/// `deinit`.
+pub const ErrorInfo = struct {
+    /// What went wrong; the same text as `Client.errorMessage()`.
+    message: []const u8,
+    /// HTTP status of the failed response, or null when no response was
+    /// received (`error.Timeout`).
+    status: ?std.http.Status = null,
+    /// The request URL without the `api_key`, safe to log.
+    url: ?[]const u8 = null,
+    /// `search_metadata.id` from the error payload, when serpapi.com
+    /// assigned one to the failed search.
+    search_id: ?[]const u8 = null,
+};
+
+/// The API key as held by the client. Formatting with `{f}` masks it, and
+/// it is kept behind a many-item pointer so that `{any}` on the client
+/// prints an address, never the key bytes.
+const Secret = struct {
+    ptr: [*]const u8,
+    len: usize,
+
+    fn reveal(self: Secret) []const u8 {
+        return self.ptr[0..self.len];
+    }
+
+    /// Mask the key as serpapi-ruby's `Client#inspect` does: the first and
+    /// last four characters of a key longer than eight, `****` otherwise.
+    pub fn format(self: Secret, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const key = self.reveal();
+        if (key.len > 8) {
+            try w.print("{s}****{s}", .{ key[0..4], key[key.len - 4 ..] });
+        } else {
+            try w.writeAll("****");
+        }
+    }
+};
+
 /// Client for SerpApi.com.
 ///
 /// Query parameters are plain anonymous structs, the same shape
@@ -70,14 +109,18 @@ pub const Client = struct {
     /// Event loop / thread pool backing std.http. Heap-stable inside Client.
     threaded: std.Io.Threaded,
     http: std.http.Client,
-    /// Default query parameters applied to every request (owned copies).
+    /// Default query parameters applied to every request (owned copies),
+    /// except the API key, which lives in `api_key`.
     params: std.array_list.Managed(Param),
+    /// API key provided to the constructor (owned), see `apiKey`. Sent
+    /// along with `params`, but never printed.
+    api_key: ?Secret = null,
     /// HTTP request timeout in seconds, 0 to wait forever [default: 120].
     timeout: u32,
     /// Keep the connection open between requests (3-4x faster). [default: true]
     persistent: bool,
-    /// Last error payload returned by serpapi.com (owned), see `errorMessage`.
-    last_error: ?[]u8 = null,
+    /// Last failure (owned strings), see `lastError` and `errorMessage`.
+    last_error: ?ErrorInfo = null,
 
     /// Configuration-only option names; every other `init` field becomes a
     /// default query parameter, mirroring serpapi-ruby's constructor hash.
@@ -117,9 +160,15 @@ pub const Client = struct {
         };
         self.http = .{ .allocator = allocator, .io = self.threaded.io() };
         errdefer self.freeParams();
+        errdefer self.freeApiKey();
 
         inline for (@typeInfo(@TypeOf(options)).@"struct".fields) |field| {
             if (comptime isConfigOption(field.name)) continue;
+            if (comptime std.mem.eql(u8, field.name, "api_key")) {
+                const key = try allocator.dupe(u8, options.api_key);
+                self.api_key = .{ .ptr = key.ptr, .len = key.len };
+                continue;
+            }
             try self.addParamValue(field.name, @field(options, field.name));
         }
         // track the zig library as a client for statistic purpose
@@ -131,7 +180,8 @@ pub const Client = struct {
     /// Release all resources held by the client and close open connections.
     pub fn deinit(self: *Client) void {
         const allocator = self.allocator;
-        if (self.last_error) |msg| allocator.free(msg);
+        self.clearLastError();
+        self.freeApiKey();
         self.freeParams();
         self.http.deinit();
         self.threaded.deinit();
@@ -275,15 +325,50 @@ pub const Client = struct {
 
     /// User secret API key as provided to the constructor, if any.
     pub fn apiKey(self: *const Client) ?[]const u8 {
-        return self.param("api_key");
+        const key = self.api_key orelse return null;
+        return key.reveal();
     }
 
-    /// Error payload from serpapi.com for the last failed request, if any.
+    /// Description of the last failed request, if any: the error payload
+    /// from serpapi.com, the raw body of a non-200 response, or the client's
+    /// own message. See `lastError` for the HTTP status, URL and search id.
     pub fn errorMessage(self: *const Client) ?[]const u8 {
+        const info = self.last_error orelse return null;
+        return info.message;
+    }
+
+    /// Details of the last failed request, if any: message, HTTP status,
+    /// URL without the api_key, and search id. Mirrors the fields of
+    /// serpapi-ruby's `SerpApiError`.
+    ///
+    /// ```zig
+    /// var results = client.search(.{ .q = "coffee" }) catch |err| {
+    ///     if (client.lastError()) |info| {
+    ///         std.debug.print("{t}: HTTP {?d} {?s}: {s}\n", .{
+    ///             err, if (info.status) |s| @intFromEnum(s) else null, info.url, info.message,
+    ///         });
+    ///     }
+    ///     return err;
+    /// };
+    /// ```
+    pub fn lastError(self: *const Client) ?ErrorInfo {
         return self.last_error;
     }
 
+    /// Print the client configuration with the API key masked, as
+    /// serpapi-ruby's `Client#inspect` does, e.g.
+    /// `serpapi.Client{ .engine = "google", .timeout = 120, .persistent = true, .api_key = "abcd****wxyz" }`.
+    /// Use it with `{f}`: `std.debug.print("{f}\n", .{client})`.
+    pub fn format(self: *const Client, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll("serpapi.Client{ .engine = ");
+        if (self.engine()) |name| try w.print("\"{s}\"", .{name}) else try w.writeAll("null");
+        try w.print(", .timeout = {d}, .persistent = {}, .api_key = ", .{ self.timeout, self.persistent });
+        if (self.api_key) |key| try w.print("\"{f}\"", .{key}) else try w.writeAll("null");
+        try w.writeAll(" }");
+    }
+
     fn param(self: *const Client, key: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, key, "api_key")) return self.apiKey();
         for (self.params.items) |item| {
             if (std.mem.eql(u8, item.key, key)) return item.value;
         }
@@ -342,10 +427,42 @@ pub const Client = struct {
         self.params.deinit();
     }
 
-    fn setLastError(self: *Client, message: []const u8) !void {
-        const copy = try self.allocator.dupe(u8, message);
-        if (self.last_error) |old| self.allocator.free(old);
-        self.last_error = copy;
+    fn freeApiKey(self: *Client) void {
+        if (self.api_key) |key| self.allocator.free(key.reveal());
+        self.api_key = null;
+    }
+
+    fn clearLastError(self: *Client) void {
+        const info = self.last_error orelse return;
+        self.allocator.free(info.message);
+        if (info.url) |url| self.allocator.free(url);
+        if (info.search_id) |id| self.allocator.free(id);
+        self.last_error = null;
+    }
+
+    /// Record `info` as the last failure, copying its strings.
+    fn fail(self: *Client, info: ErrorInfo) Allocator.Error!void {
+        const message = try self.allocator.dupe(u8, info.message);
+        errdefer self.allocator.free(message);
+        const url = if (info.url) |url| try self.allocator.dupe(u8, url) else null;
+        errdefer if (url) |u| self.allocator.free(u);
+        const search_id = if (info.search_id) |id| try self.allocator.dupe(u8, id) else null;
+
+        self.clearLastError();
+        self.last_error = .{ .message = message, .status = info.status, .url = url, .search_id = search_id };
+    }
+
+    fn setLastError(self: *Client, message: []const u8) Allocator.Error!void {
+        return self.fail(.{ .message = message });
+    }
+
+    /// Attach the URL of the request that just failed to the last error,
+    /// leaving out the api_key.
+    fn recordUrl(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) Allocator.Error!void {
+        const info = &(self.last_error orelse return);
+        const url = try self.buildUrlWith(self.allocator, endpoint, params, extra, .omit);
+        if (info.url) |old| self.allocator.free(old);
+        info.url = url;
     }
 
     /// Write one query parameter value, percent-encoding strings and
@@ -362,40 +479,49 @@ pub const Client = struct {
         }
     }
 
-    /// Build the Search Archive path `/searches/<id>.<format>`, percent-encoding
+    /// Build the Search Archive path `/searches/<id>.<extension>`, percent-encoding
     /// the id so it cannot escape the path. Caller owns the result.
-    fn archiveEndpoint(self: *const Client, search_id: []const u8, format: []const u8) Allocator.Error![]u8 {
+    fn archiveEndpoint(self: *const Client, search_id: []const u8, extension: []const u8) Allocator.Error![]u8 {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer out.deinit();
 
         // an Allocating writer only ever fails to allocate
-        writeArchiveEndpoint(&out.writer, search_id, format) catch return error.OutOfMemory;
+        writeArchiveEndpoint(&out.writer, search_id, extension) catch return error.OutOfMemory;
         return out.toOwnedSlice();
     }
 
-    fn writeArchiveEndpoint(w: *std.Io.Writer, search_id: []const u8, format: []const u8) std.Io.Writer.Error!void {
+    fn writeArchiveEndpoint(w: *std.Io.Writer, search_id: []const u8, extension: []const u8) std.Io.Writer.Error!void {
         try w.writeAll("/searches/");
         try std.Uri.Component.percentEncode(w, search_id, isUrlSafe);
         try w.writeByte('.');
-        try w.writeAll(format);
+        try w.writeAll(extension);
     }
 
     /// Build the full request URL: https://serpapi.com<endpoint>?<query>.
     /// Precedence: call `params`, then `extra`, then constructor defaults.
     fn buildUrl(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param) Allocator.Error![]u8 {
+        return self.buildUrlWith(allocator, endpoint, params, extra, .include);
+    }
+
+    /// Whether a URL carries the `api_key`: the request URL does, the one
+    /// recorded for error reporting does not.
+    const ApiKeyMode = enum { include, omit };
+
+    fn buildUrlWith(self: *const Client, allocator: Allocator, endpoint: []const u8, params: anytype, extra: []const Param, comptime mode: ApiKeyMode) Allocator.Error![]u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
         // an Allocating writer only ever fails to allocate
-        self.writeUrl(&out.writer, endpoint, params, extra) catch return error.OutOfMemory;
+        self.writeUrl(&out.writer, endpoint, params, extra, mode) catch return error.OutOfMemory;
         return out.toOwnedSlice();
     }
 
-    fn writeUrl(self: *const Client, w: *std.Io.Writer, endpoint: []const u8, params: anytype, extra: []const Param) std.Io.Writer.Error!void {
+    fn writeUrl(self: *const Client, w: *std.Io.Writer, endpoint: []const u8, params: anytype, extra: []const Param, comptime mode: ApiKeyMode) std.Io.Writer.Error!void {
         try w.print("https://{s}{s}", .{ backend, endpoint });
 
         var separator: u8 = '?';
         inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |field| {
+            if (mode == .omit and comptime std.mem.eql(u8, field.name, "api_key")) continue;
             try w.writeByte(separator);
             separator = '&';
             try std.Uri.Component.percentEncode(w, field.name, isUrlSafe);
@@ -410,6 +536,12 @@ pub const Client = struct {
             try w.writeByte('=');
             try std.Uri.Component.percentEncode(w, item.value, isUrlSafe);
         }
+        if (self.api_key) |key| if (mode == .include and !hasParam(params, "api_key")) {
+            try w.writeByte(separator);
+            separator = '&';
+            try w.writeAll("api_key=");
+            try std.Uri.Component.percentEncode(w, key.reveal(), isUrlSafe);
+        };
         for (self.params.items) |item| {
             if (hasParam(params, item.key) or containsKey(extra, item.key)) continue;
             try w.writeByte(separator);
@@ -561,38 +693,51 @@ pub const Client = struct {
     }
 
     fn getJson(self: *Client, comptime T: type, endpoint: []const u8, params: anytype, extra: []const Param) !std.json.Parsed(T) {
-        const response = try self.get(endpoint, params, extra);
+        const response = try self.getChecked(endpoint, params, extra);
         defer self.allocator.free(response.body);
-
-        try self.checkResponse(response.body, response.status);
 
         const parsed = std.json.parseFromSlice(T, self.allocator, response.body, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch {
-            try self.setLastError(response.body);
+            try self.fail(.{ .message = response.body, .status = response.status });
+            try self.recordUrl(endpoint, params, extra);
             return Error.JsonParseError;
         };
         return parsed;
     }
 
     fn getRaw(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) ![]u8 {
-        const response = try self.get(endpoint, params, extra);
-        errdefer self.allocator.free(response.body);
-
-        try self.checkResponse(response.body, response.status);
+        const response = try self.getChecked(endpoint, params, extra);
         return response.body;
     }
 
+    /// `get`, then apply `checkResponse`. A failure the client recorded (an
+    /// error payload, a non-200 status, a timeout) also records the request
+    /// URL, without the api_key, for `lastError`.
+    fn getChecked(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) !Response {
+        const response = self.get(endpoint, params, extra) catch |err| {
+            if (err == Error.Timeout) try self.recordUrl(endpoint, params, extra);
+            return err;
+        };
+        errdefer self.allocator.free(response.body);
+
+        self.checkResponse(response.body, response.status) catch |err| {
+            if (err != error.OutOfMemory) try self.recordUrl(endpoint, params, extra);
+            return err;
+        };
+        return response;
+    }
+
     /// Apply the error rule shared by every decoder, recording the details
-    /// for `errorMessage`:
+    /// for `errorMessage` and `lastError`:
     ///  * an `{"error": "..."}` payload is `SerpApiError`, whatever the
     ///    HTTP status (serpapi.com uses 200 as well as 4xx for these);
     ///  * otherwise a non-200 status is `HttpRequestFailed`.
     fn checkResponse(self: *Client, body: []const u8, status: std.http.Status) !void {
-        if (try self.captureErrorPayload(body)) return Error.SerpApiError;
+        if (try self.captureErrorPayload(body, status)) return Error.SerpApiError;
         if (status != .ok) {
-            try self.setLastError(if (body.len > 0) body else @tagName(status));
+            try self.fail(.{ .message = if (body.len > 0) body else @tagName(status), .status = status });
             return Error.HttpRequestFailed;
         }
     }
@@ -601,10 +746,15 @@ pub const Client = struct {
     /// parse too (every other field is skipped) and leave `error` null.
     const ErrorPayload = struct { @"error": ?[]const u8 = null };
 
+    /// Search id carried by an error payload. Parsed on its own so that an
+    /// unexpected `search_metadata` shape cannot hide the error itself.
+    const ErrorMetadata = struct { search_metadata: ?struct { id: ?[]const u8 = null } = null };
+
     /// If `body` is a JSON object carrying a string `error` field, store the
-    /// message as the last error and return true. Anything else (HTML,
-    /// Markdown, a JSON array, an object without `error`) returns false.
-    fn captureErrorPayload(self: *Client, body: []const u8) !bool {
+    /// message, `status` and search id as the last error and return true.
+    /// Anything else (HTML, Markdown, a JSON array, an object without
+    /// `error`) returns false.
+    fn captureErrorPayload(self: *Client, body: []const u8, status: std.http.Status) !bool {
         const parsed = std.json.parseFromSlice(ErrorPayload, self.allocator, body, .{
             .ignore_unknown_fields = true,
         }) catch |err| switch (err) {
@@ -613,7 +763,15 @@ pub const Client = struct {
         };
         defer parsed.deinit();
         const message = parsed.value.@"error" orelse return false;
-        try self.setLastError(message);
+        const metadata = std.json.parseFromSlice(ErrorMetadata, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
+        defer if (metadata) |m| m.deinit();
+        const search_id = if (metadata) |m| if (m.value.search_metadata) |meta| meta.id else null else null;
+        try self.fail(.{ .message = message, .status = status, .search_id = search_id });
         return true;
     }
 };
@@ -1030,4 +1188,141 @@ test "persistent connection is reused after a chunked gzip response" {
         try testing.expectEqual(@as(usize, 1), client.http.connection_pool.free_len);
     }
     try served.await(io);
+}
+
+test "format masks the api key like serpapi-ruby's inspect" {
+    var client = try Client.init(testing.allocator, .{ .api_key = "0123456789abcdef", .engine = "google" });
+    defer client.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try out.writer.print("{f}", .{client});
+    try testing.expectEqualStrings(
+        "serpapi.Client{ .engine = \"google\", .timeout = 120, .persistent = true, .api_key = \"0123****cdef\" }",
+        out.written(),
+    );
+
+    // a short key is masked whole
+    var short = try Client.init(testing.allocator, .{ .api_key = "12345678", .timeout = 5, .persistent = false });
+    defer short.deinit();
+    out.clearRetainingCapacity();
+    try out.writer.print("{f}", .{short.*});
+    try testing.expectEqualStrings(
+        "serpapi.Client{ .engine = null, .timeout = 5, .persistent = false, .api_key = \"****\" }",
+        out.written(),
+    );
+
+    var anonymous = try Client.init(testing.allocator, .{});
+    defer anonymous.deinit();
+    out.clearRetainingCapacity();
+    try out.writer.print("{f}", .{anonymous});
+    try testing.expect(std.mem.endsWith(u8, out.written(), ".api_key = null }"));
+}
+
+test "the api key does not show up when printing the client state with {any}" {
+    var client = try Client.init(testing.allocator, .{ .api_key = "0123456789abcdef", .engine = "google" });
+    defer client.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    // well past the default depth: every byte that is reachable gets printed
+    try out.writer.printValue("any", .{}, client.params.items, 10);
+    try out.writer.printValue("any", .{}, client.api_key, 10);
+    try out.writer.printValue("any", .{}, client.last_error, 10);
+
+    const printed = out.written();
+    try testing.expect(std.mem.indexOf(u8, printed, "0123456789abcdef") == null);
+    // nor as the decimal byte values `{any}` prints for a []const u8
+    try testing.expect(std.mem.indexOf(u8, printed, "48, 49, 50, 51") == null);
+    try testing.expect(std.mem.indexOf(u8, printed, "103, 111, 111, 103, 108, 101") != null); // "google" is printed
+    try testing.expectEqualStrings("0123456789abcdef", client.apiKey().?);
+}
+
+test "lastError reports the status of a non-200 response" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
+
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("Not Found", .not_found));
+    var info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.not_found, info.status.?);
+    try testing.expectEqualStrings("Not Found", info.message);
+    try testing.expectEqual(@as(?[]const u8, null), info.search_id);
+
+    try testing.expectError(Error.HttpRequestFailed, client.checkResponse("<html>Bad Gateway</html>", .bad_gateway));
+    info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.bad_gateway, info.status.?);
+    try testing.expectEqualStrings("<html>Bad Gateway</html>", info.message);
+    try testing.expectEqualStrings(info.message, client.errorMessage().?);
+}
+
+test "lastError reports the search id of an error payload" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectError(Error.SerpApiError, client.checkResponse(
+        "{\"search_metadata\":{\"id\":\"68a0d7f2\",\"status\":\"Error\"},\"error\":\"Google hasn't returned any results for this query.\"}",
+        .ok,
+    ));
+    const info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.ok, info.status.?);
+    try testing.expectEqualStrings("68a0d7f2", info.search_id.?);
+    try testing.expectEqualStrings("Google hasn't returned any results for this query.", info.message);
+
+    // an unexpected search_metadata shape does not hide the error
+    try testing.expectError(Error.SerpApiError, client.checkResponse("{\"search_metadata\":[1],\"error\":\"boom\"}", .bad_request));
+    try testing.expectEqualStrings("boom", client.errorMessage().?);
+    try testing.expectEqual(@as(?[]const u8, null), client.lastError().?.search_id);
+}
+
+test "recordUrl leaves the api key out of the reported URL" {
+    var client = try Client.init(testing.allocator, .{ .api_key = "secret_key", .engine = "google" });
+    defer client.deinit();
+
+    // nothing to attach the URL to without a failure
+    try client.recordUrl("/search", .{ .q = "coffee" }, &.{});
+    try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
+
+    try testing.expectError(Error.SerpApiError, client.checkResponse("{\"error\":\"Invalid API key.\"}", .unauthorized));
+    try client.recordUrl("/search", .{ .q = "coffee" }, &.{.{ .key = "output", .value = "html" }});
+    try testing.expectEqualStrings(
+        "https://serpapi.com/search?q=coffee&output=html&engine=google&source=serpapi-zig%3A" ++ version,
+        client.lastError().?.url.?,
+    );
+
+    // a key passed with the call is left out as well
+    try client.recordUrl("/account", .{ .api_key = "call_key" }, &.{});
+    try testing.expectEqualStrings(
+        "https://serpapi.com/account?engine=google&source=serpapi-zig%3A" ++ version,
+        client.lastError().?.url.?,
+    );
+    try testing.expectEqual(std.http.Status.unauthorized, client.lastError().?.status.?);
+
+    // the request URL itself still carries the key, the call's first
+    const url = try client.buildUrl(testing.allocator, "/account", .{ .api_key = "call_key" }, &.{});
+    defer testing.allocator.free(url);
+    try testing.expectEqualStrings(
+        "https://serpapi.com/account?api_key=call_key&engine=google&source=serpapi-zig%3A" ++ version,
+        url,
+    );
+}
+
+test "failure details clean up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator) !void {
+            var client = try Client.init(allocator, .{ .api_key = "secret_key" });
+            defer client.deinit();
+
+            client.checkResponse("{\"search_metadata\":{\"id\":\"1\"},\"error\":\"boom\"}", .bad_request) catch |err| switch (err) {
+                Error.SerpApiError => {},
+                else => return err,
+            };
+            try client.recordUrl("/search", .{ .q = "coffee" }, &.{});
+            client.checkResponse("Bad Gateway", .bad_gateway) catch |err| switch (err) {
+                Error.HttpRequestFailed => {},
+                else => return err,
+            };
+        }
+    }.run, .{});
 }

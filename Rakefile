@@ -127,15 +127,23 @@ namespace :install do
   end
 end
 
-desc 'release: tag the current version and push it to GitHub'
-task :release do
+namespace :release do
+  desc 'fail fast unless the working tree is clean and SERPAPI_KEY is set'
+  task :preflight do
+    # `git diff --quiet` misses staged and untracked files; porcelain lists all
+    dirty = `git status --porcelain`
+    raise 'git status failed' unless $?.success?
+    raise "working tree is dirty, commit first:\n#{dirty}" unless dirty.strip.empty?
+    raise 'SERPAPI_KEY is required: without it the integration tests skip' if ENV['SERPAPI_KEY'].to_s.empty?
+  end
+end
+
+desc 'release: run every check, then tag the current version and push it to GitHub'
+task release: %i[release:preflight lint test itest oobt] do
   version = File.read('build.zig.zon')[/\.version\s*=\s*"([^"]+)"/, 1]
   raise 'cannot read version from build.zig.zon' if version.nil?
 
   puts "releasing v#{version}"
-  sh 'git diff --quiet' do |ok, _|
-    raise 'working tree is dirty, commit first' unless ok
-  end
   sh "git tag -a v#{version} -m 'Release v#{version}'"
   sh 'git push origin master --tags'
   puts "released: https://github.com/serpapi/serpapi-zig/releases/tag/v#{version}"

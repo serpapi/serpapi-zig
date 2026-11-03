@@ -168,6 +168,26 @@ All fields are optional. Parameters passed to a method call override the
 defaults provided to the constructor. Call `client.deinit()` when the client
 is no longer needed; it closes the connection and frees all resources.
 
+The client reports its configuration back:
+
+```zig
+client.engine()     // ?[]const u8: default engine, "google" here
+client.apiKey()     // ?[]const u8: the API key given to the constructor
+serpapi.version     // the library version, "1.1.0", reported to serpapi.com
+```
+
+Printing the client masks the API key, as serpapi-ruby's `inspect` does —
+the first and last four characters of a key longer than eight, `****`
+otherwise:
+
+```zig
+std.debug.print("{f}\n", .{client});
+// serpapi.Client{ .engine = "google", .timeout = 30, .persistent = true, .api_key = "abcd****wxyz" }
+```
+
+The key is stored apart from the other defaults, so dumping the client's
+fields with `{any}` does not reveal it either.
+
 `timeout` bounds the whole request — connecting, TLS handshake, and reading
 the response — and a request that overruns it fails with `error.Timeout`
 (details in `client.errorMessage()`), dropping the stalled connection so the
@@ -298,8 +318,26 @@ requested type), `error.Timeout` (the request overran the client's `timeout`),
 plus any network / TLS / allocation errors propagated from the standard
 library. The four client errors are grouped in `serpapi.Error`.
 
-A `Client` is not thread-safe — `errorMessage()` reports the last failure seen
-by that instance — so use one client per thread.
+`client.lastError()` returns the details of the last failure, mirroring
+serpapi-ruby's `SerpApiError`: the `message` (same as `errorMessage()`), the
+HTTP `status`, the request `url` with the `api_key` left out — safe to log —
+and the `search_id` when serpapi.com assigned one to the failed search.
+`status` is null when no response arrived (`error.Timeout`).
+
+```zig
+var archived = client.searchArchive(search_id) catch |err| {
+    if (client.lastError()) |info| {
+        // SerpApiError: HTTP 404 https://serpapi.com/searches/<id>.json?source=serpapi-zig%3A1.1.0: Search not found.
+        std.debug.print("{t}: HTTP {?d} {?s}: {s}\n", .{
+            err, if (info.status) |s| @intFromEnum(s) else null, info.url, info.message,
+        });
+    }
+    return err;
+};
+```
+
+A `Client` is not thread-safe — `errorMessage()` and `lastError()` report the
+last failure seen by that instance — so use one client per thread.
 
 ## Search asynchronous
 

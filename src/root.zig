@@ -12,6 +12,7 @@ pub const version = client.version;
 pub const Client = client.Client;
 pub const Param = client.Param;
 pub const Error = client.Error;
+pub const ErrorInfo = client.ErrorInfo;
 
 test {
     std.testing.refAllDecls(@This());

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- `Client.lastError()` returns a `serpapi.ErrorInfo` with the details of the
+  last failure, mirroring serpapi-ruby's `SerpApiError`: `message` (as
+  `errorMessage()`), the HTTP `status`, the request `url` without the
+  `api_key`, and the `search_id` from the error payload
+- `Client.format`: printing a client with `{f}` shows its configuration
+  with the API key masked, as serpapi-ruby's `inspect` does
+  (`abcd****wxyz`, `****` for a key of eight characters or fewer)
+- README documents `engine()`, `apiKey()` and `serpapi.version`
+- `rake release` runs `lint`, `test`, `itest` and `oobt` before tagging,
+  and refuses to start unless `SERPAPI_KEY` is set and `git status
+  --porcelain` is empty (the previous `git diff --quiet` missed staged and
+  untracked files)
+
+### Behavior changes
+
+- The API key is no longer kept in `Client.params`: it moved to its own
+  `api_key` field, which `{any}` prints as an address, so dumping the
+  client state no longer leaks it. `apiKey()` is unchanged; code that read
+  the key from `client.params.items` must call `apiKey()` instead
+- `Client.last_error` is now a `?serpapi.ErrorInfo` instead of `?[]u8`;
+  `errorMessage()` is unchanged
+
 ## 1.1.0 (2026-09-23)
 
 - Markdown output: `md` (Search API) and `searchArchiveMd` (Search Archive
