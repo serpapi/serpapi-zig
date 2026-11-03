@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 (unreleased)
 
 - `Client.lastError()` returns a `serpapi.ErrorInfo` with the details of the
   last failure, mirroring serpapi-ruby's `SerpApiError`: `message` (as
@@ -23,6 +23,8 @@
   DNS error after a 404 still reported the 404
 
 ### Breaking changes
+
+These ship in a minor release by decision; pin `v1.1.0` to keep the old API.
 
 - The API key is no longer kept in `Client.params`: it moved to its own
   `api_key` field, which `{any}` prints as an address, so dumping the

@@ -173,7 +173,7 @@ The client reports its configuration back:
 ```zig
 client.engine()     // ?[]const u8: default engine, "google" here
 client.apiKey()     // ?[]const u8: the API key given to the constructor
-serpapi.version     // the library version, "1.1.0", reported to serpapi.com
+serpapi.version     // the library version, "1.2.0", reported to serpapi.com
 ```
 
 Printing the client masks the API key, as serpapi-ruby's `inspect` does —
@@ -331,7 +331,7 @@ connection, TLS) — such errors carry no details beyond the Zig error itself.
 ```zig
 var archived = client.searchArchive(search_id) catch |err| {
     if (client.lastError()) |info| {
-        // SerpApiError: HTTP 404 https://serpapi.com/searches/<id>.json?source=serpapi-zig%3A1.1.0: Search not found.
+        // SerpApiError: HTTP 404 https://serpapi.com/searches/<id>.json?source=serpapi-zig%3A1.2.0: Search not found.
         std.debug.print("{t}: HTTP {?d} {?s}: {s}\n", .{
             err, if (info.status) |s| @intFromEnum(s) else null, info.url, info.message,
         });
