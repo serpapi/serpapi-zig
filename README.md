@@ -11,6 +11,7 @@ Query a vast range of data at scale, including web search results, flight schedu
 ## Features
   * `persistent` → Keep socket connection open to save on SSL handshake / reconnection (3-4x faster on repeated searches).
   * `md` → Markdown output, token-efficient and ready to feed to LLMs and AI agents. [Search API — Markdown](#search-api--markdown)
+  * `uploadImage` → upload a local image, then search it with Google Lens. [Google Lens with File Upload](#google-lens-with-file-upload)
   * zero dependency → only the Zig standard library (`std.http`, `std.json`), nothing else to fetch.
   * cross platform → Linux, macOS, and Windows.
   * extensive documentation → easy to follow.
@@ -221,7 +222,8 @@ var results = try client.searchAs(Answer, .{ .q = "coffee" });
 std.debug.print("status: {s}\n", .{results.value.search_metadata.status});
 ```
 
-Also available: `locationAs`, `searchArchiveAs`, and `accountAs`.
+Also available: `locationAs`, `searchArchiveAs`, `accountAs`,
+`uploadImageAs`, and `uploadImageBytesAs`.
 
 ### Search API — raw HTML
 
@@ -289,6 +291,34 @@ The api_key provided to the constructor is used; override it with
 
 doc: [serpapi.com/account-api](https://serpapi.com/account-api)
 
+### Google Lens with File Upload
+
+Upload an image with the Image API, then use its image ID in a Google Lens
+search. Uploaded image IDs expire after 10 minutes.
+
+```zig
+var upload = try client.uploadImage("./image.jpg", .{});
+const image_id = upload.value.object.get("image_id").?.string;
+
+var results = try client.search(.{ .engine = "google_lens", .image_id = image_id });
+const visual_matches = results.value.object.get("visual_matches");
+```
+
+The image already in memory? Pass its bytes and a file name instead:
+`client.uploadImageBytes(bytes, "image.jpg", .{})`. The content type is
+detected from the image signature (jpg, jpeg, png, webp), falling back to
+the file name's extension.
+
+The image is sent as `multipart/form-data` in a `POST` to
+`https://serpapi.com/image`, with the `api_key` in the form body rather
+than the URL; override it per call with `.{ .api_key = "other key" }`.
+Search defaults from the constructor (`engine`, `output`, ...) are not sent.
+Images larger than 500 KiB (`serpapi.image_max_size`) fail with
+`error.ImageTooLarge` before anything is read or sent, and file errors such
+as `error.FileNotFound` are returned as-is.
+
+doc: [serpapi.com/image-api](https://serpapi.com/image-api) · [Google Lens image upload](https://serpapi.com/google-lens-upload-an-image)
+
 ## Error handling
 
 Methods return a Zig error union. When serpapi.com reports a failure — an
@@ -311,8 +341,9 @@ Other errors, all with details in `client.errorMessage()`:
 message is the raw body, or the status name when the body is empty),
 `error.JsonParseError` (response was not valid JSON, or did not fit the
 requested type), `error.Timeout` (the request overran the client's `timeout`),
-plus any network / TLS / allocation errors propagated from the standard
-library. The four client errors are grouped in `serpapi.Error`.
+`error.ImageTooLarge` (an upload over `serpapi.image_max_size`, never sent),
+plus any network / TLS / allocation / file errors propagated from the
+standard library. The client errors are grouped in `serpapi.Error`.
 
 `client.lastError()` returns the details of the last failure, mirroring
 serpapi-ruby's `SerpApiError`: the `message` (same as `errorMessage()`), the

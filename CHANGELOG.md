@@ -2,6 +2,18 @@
 
 ## 1.2.0 (unreleased)
 
+### Features
+
+- Image API: `uploadImage` (file path) and `uploadImageBytes` (in-memory
+  image), with typed `uploadImageAs` / `uploadImageBytesAs`, upload an image
+  to `POST https://serpapi.com/image` as `multipart/form-data` and return
+  its `image_id` for engines such as Google Lens. The `api_key` travels in
+  the form body, never in the URL; constructor search defaults (`engine`,
+  `output`, ...) are not sent. The content type is detected from the image
+  signature (JPEG, PNG, WebP), falling back to the file extension.
+  Images over 500 KiB (`serpapi.image_max_size`) are rejected with
+  `error.ImageTooLarge` before being read or sent
+- The out-of-box test (`zig build oobt`) also uploads an image
 - `Client.lastError()` returns a `serpapi.ErrorInfo` with the details of the
   last failure, mirroring serpapi-ruby's `SerpApiError`: `message` (as
   `errorMessage()`), the HTTP `status`, the request `url` without the
@@ -35,6 +47,8 @@ These ship in a minor release by decision; pin `v1.1.0` to keep the old API.
   the key from `client.params.items` must call `apiKey()` instead
 - `Client.last_error` is now a `?serpapi.ErrorInfo` instead of `?[]u8`;
   `errorMessage()` is unchanged
+- `serpapi.Error` gains `ImageTooLarge`: code that switches exhaustively
+  over `serpapi.Error` needs a prong for it
 
 ## 1.1.0 (2026-09-23)
 
