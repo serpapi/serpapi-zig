@@ -5,6 +5,7 @@
 //!  * location API (persistent and non-persistent connections)
 //!  * account API
 //!  * search archive API
+//!  * image API (upload, then a Google Lens search on the uploaded image)
 //!  * error reporting on invalid input (message, HTTP status, key-free URL)
 //!
 //! Tests that need an API key read the SERPAPI_KEY environment variable
@@ -284,4 +285,86 @@ test "persistent connection performs multiple searches" {
         defer result.deinit();
         try testing.expect(result.value.object.get("organic_results") != null);
     }
+}
+
+/// Smallest valid PNG: a 1x1 transparent pixel.
+const png_1x1 = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+    "\x00\x00\x00\x0aIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\x0d\x0a\x2d\xb4\x00\x00\x00\x00IEND\xaeB\x60\x82";
+
+test "uploadImage uploads a file" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key });
+    defer client.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pixel.png", .data = png_1x1 });
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/pixel.png", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+
+    var upload = try client.uploadImage(path, .{});
+    defer upload.deinit();
+
+    try testing.expectEqualStrings("Image uploaded successfully.", upload.value.object.get("message").?.string);
+    try testing.expect(upload.value.object.get("image_id").?.string.len > 0);
+}
+
+test "uploadImageBytesAs uploads in-memory bytes with a per-call api_key" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    // search defaults are not forwarded to the Image API
+    var client = try serpapi.Client.init(testing.allocator, .{ .engine = "google_lens", .output = "html" });
+    defer client.deinit();
+
+    // no extension: the content type comes from the PNG signature
+    var upload = try client.uploadImageBytesAs(struct { image_id: []const u8 }, png_1x1, "image", .{ .api_key = key });
+    defer upload.deinit();
+
+    try testing.expect(upload.value.image_id.len > 0);
+}
+
+test "uploadImageBytes rejects an invalid image" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key });
+    defer client.deinit();
+
+    try testing.expectError(serpapi.Error.SerpApiError, client.uploadImageBytes("invalid image data", "invalid.txt", .{}));
+    try testing.expect(std.mem.indexOf(u8, client.errorMessage().?, "Invalid image format") != null);
+    const info = client.lastError().?;
+    try testing.expectEqual(std.http.Status.bad_request, info.status.?);
+    try testing.expectEqualStrings("https://serpapi.com/image", info.url.?);
+}
+
+test "uploadImageBytes rejects an invalid api key" {
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = "invalid_api_key" });
+    defer client.deinit();
+
+    try testing.expectError(serpapi.Error.SerpApiError, client.uploadImageBytes(png_1x1, "image.png", .{}));
+    const message = client.errorMessage().?;
+    try testing.expect(std.ascii.indexOfIgnoreCase(message, "invalid api key") != null);
+    try testing.expect(std.mem.indexOf(u8, message, "invalid_api_key") == null);
+    try testing.expectEqualStrings("https://serpapi.com/image", client.lastError().?.url.?);
+}
+
+test "google lens searches an uploaded image" {
+    const key = apiKey(testing.allocator) orelse return error.SkipZigTest;
+    defer testing.allocator.free(key);
+
+    var client = try serpapi.Client.init(testing.allocator, .{ .api_key = key, .engine = "google_lens" });
+    defer client.deinit();
+
+    var upload = try client.uploadImageBytes(png_1x1, "pixel.png", .{});
+    defer upload.deinit();
+    const image_id = upload.value.object.get("image_id").?.string;
+
+    var results = try client.search(.{ .image_id = image_id });
+    defer results.deinit();
+
+    const metadata = results.value.object.get("search_metadata").?.object;
+    try testing.expectEqualStrings("Success", metadata.get("status").?.string);
 }
