@@ -484,7 +484,7 @@ zig build cov
 open zig-out/coverage/merged/kcov-merged/index.html
 ```
 
-Current state: **94.01% of lines covered** (596 of 634) without an API key,
+Current state: **95.07% of lines covered** (867 of 912) without an API key,
 since the tests covering `html`, `md`, `searchArchive`, and `account` skip
 themselves rather than fail. With `SERPAPI_KEY` set — as in CI, which
 publishes the figure to every job summary and fails below 90% — those paths
@@ -502,6 +502,30 @@ generates code for a generic (`anytype`) function that no test instantiates
 — so every HTTP method disappears from the denominator instead of counting
 as uncovered. `zig build cov` therefore measures the unit and integration
 binaries and merges the two reports.
+
+## Changelog
+
+Full details in [CHANGELOG.md](CHANGELOG.md).
+
+- [2026-11-05] 1.2.0 Image API, error details and a safer client dump
+  - Added `uploadImage()` and `uploadImageBytes()` (and typed `uploadImageAs()` / `uploadImageBytesAs()`) for the [Image API](https://serpapi.com/image-api), returning the `image_id` to use with engines such as `google_lens`. The `api_key` goes in the form body, never in the URL, and images over 500 KiB fail fast with `error.ImageTooLarge`
+  - Added `lastError()`, returning a `serpapi.ErrorInfo` with the message, HTTP status, request URL (without the `api_key`) and `search_id` of the last failure
+  - Printing a client with `{f}` masks the API key (`abcd****wxyz`)
+  - `errorMessage()` and `lastError()` describe the most recent request only: a success or a transport error clears the previous failure
+  - **Breaking:** the API key moved out of `Client.params` (use `apiKey()`), `Client.last_error` is now `?serpapi.ErrorInfo`, and `serpapi.Error` gains `ImageTooLarge`. Pin `v1.1.0` to keep the old API
+  - `rake release` runs lint, tests, integration tests and oobt, and only from a clean `master`
+- [2026-09-23] 1.1.0 Markdown output, timeouts and connection reuse
+  - Added `md()` and `searchArchiveMd()` for `output=md` results optimized for LLMs and AI agents
+  - `serpapi.Error` is exported from the module root, and `serpapi.version` comes from `build.zig.zon`
+  - Fixed persistent connections, which were never actually reused (3-4x faster for repeated searches)
+  - Fixed the `timeout` option, which was never applied; a stalled request now returns `error.Timeout`
+  - One error rule for every decoder: an `{"error": ...}` payload is `SerpApiError` whatever the HTTP status
+  - Fixed a double free in `html()` on non-200 responses, and Search Archive ids are percent-encoded
+  - Added the browser wasm demo and the flight tracker demo
+- [2026-08-13] 1.0.0 Initial release, ported from [serpapi-ruby](https://github.com/serpapi/serpapi-ruby)
+  - `search()`, `html()`, `location()`, `searchArchive()`, `searchArchiveHtml()` and `account()`
+  - Persistent HTTP connections on by default
+  - Zero dependency: Zig standard library only
 
 ## License
 
