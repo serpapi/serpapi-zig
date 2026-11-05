@@ -364,6 +364,8 @@ pub const Client = struct {
     /// Same as `uploadImage` but decodes the payload into `T`, e.g.
     /// `struct { image_id: []const u8 }`.
     pub fn uploadImageAs(self: *Client, comptime T: type, path: []const u8, params: anytype) !std.json.Parsed(T) {
+        // a file error returns before fetch, which would otherwise clear it
+        self.clearLastError();
         const image = try self.readImage(path);
         defer self.allocator.free(image);
         return self.uploadImageBytesAs(T, image, std.fs.path.basename(path), params);
@@ -381,6 +383,7 @@ pub const Client = struct {
 
     /// Same as `uploadImageBytes` but decodes the payload into `T`.
     pub fn uploadImageBytesAs(self: *Client, comptime T: type, image: []const u8, file_name: []const u8, params: anytype) !std.json.Parsed(T) {
+        self.clearLastError();
         try self.checkImageSize(image.len);
 
         var content_type_buffer: [multipart_content_type_len]u8 = undefined;
@@ -1787,6 +1790,26 @@ test "uploadImage reports a missing file" {
     defer client.deinit();
 
     try testing.expectError(error.FileNotFound, client.uploadImage("does/not/exist.png", .{}));
+}
+
+test "a failed upload does not report the previous request's error" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // a file error never reaches fetch, which is where a request normally
+    // clears the previous failure
+    try client.fail(.{ .message = "Invalid API key.", .status = .unauthorized, .url = "https://serpapi.com/search" });
+    try testing.expectError(error.FileNotFound, client.uploadImage("does/not/exist.png", .{}));
+    try testing.expect(client.lastError() == null);
+
+    // the size check records its own error in place of the previous one
+    try client.fail(.{ .message = "Invalid API key.", .status = .unauthorized, .url = "https://serpapi.com/search" });
+    const image = try testing.allocator.alloc(u8, image_max_size + 1);
+    defer testing.allocator.free(image);
+    @memset(image, 0);
+    try testing.expectError(Error.ImageTooLarge, client.uploadImageBytes(image, "image.png", .{}));
+    try testing.expect(client.lastError().?.status == null);
+    try testing.expect(std.mem.startsWith(u8, client.errorMessage().?, "image is too large"));
 }
 
 test "readImage loads the whole file" {
