@@ -5,6 +5,7 @@
 //!  * location API
 //!  * account API
 //!  * search archive API
+//!  * image API (upload an image for Google Lens and friends)
 //!  * persistent HTTP connection (keep-alive, reused between requests)
 
 const std = @import("std");
@@ -16,6 +17,13 @@ pub const version: []const u8 = @import("build_options").version;
 
 /// Backend service host.
 pub const backend = "serpapi.com";
+
+/// Image API endpoint, the target of `uploadImage`.
+const image_url = "https://" ++ backend ++ "/image";
+
+/// Largest image the Image API accepts, in bytes (500 KiB). `uploadImage`
+/// and `uploadImageBytes` reject anything bigger before sending it.
+pub const image_max_size = 500 * 1024;
 
 /// A single query parameter (key/value pair) as stored internally for the
 /// client defaults. Public APIs take anonymous structs instead, e.g.
@@ -42,6 +50,9 @@ pub const Error = error{
     /// The request did not complete within `timeout` seconds. The connection
     /// is dropped; the next request opens a fresh one.
     Timeout,
+    /// The image passed to `uploadImage` / `uploadImageBytes` is larger than
+    /// `image_max_size`; nothing was sent.
+    ImageTooLarge,
 };
 
 /// Details of the last failed request, from `Client.lastError()`. The
@@ -322,6 +333,75 @@ pub const Client = struct {
         return self.getJson(T, "/account", params, &.{});
     }
 
+    /// Upload an image file with the Image API, returning the payload as a
+    /// dynamic JSON tree. Its `image_id` can be handed to engines that take
+    /// an uploaded image, such as Google Lens:
+    ///
+    /// ```zig
+    /// var upload = try client.uploadImage("./image.jpg", .{});
+    /// defer upload.deinit();
+    /// const image_id = upload.value.object.get("image_id").?.string;
+    /// var results = try client.search(.{ .engine = "google_lens", .image_id = image_id });
+    /// ```
+    ///
+    /// Supported formats: jpg, jpeg, png and webp, up to `image_max_size`
+    /// bytes; a bigger file fails with `error.ImageTooLarge` before it is
+    /// read. File errors such as `error.FileNotFound` are propagated as-is.
+    /// The `image_id` expires after 10 minutes.
+    ///
+    /// doc: https://serpapi.com/image-api
+    ///
+    /// `path` is absolute or relative to the current working directory; its
+    /// base name is sent as the file name. `params` go along as form fields,
+    /// e.g. `.{ .api_key = "other key" }` to override the constructor key;
+    /// a field named `image` is a compile error, as that field is the file.
+    /// Other constructor defaults (`engine`, `output`, ...) are not sent.
+    /// Caller owns the result and must call `deinit` on it.
+    pub fn uploadImage(self: *Client, path: []const u8, params: anytype) !std.json.Parsed(std.json.Value) {
+        return self.uploadImageAs(std.json.Value, path, params);
+    }
+
+    /// Same as `uploadImage` but decodes the payload into `T`, e.g.
+    /// `struct { image_id: []const u8 }`.
+    pub fn uploadImageAs(self: *Client, comptime T: type, path: []const u8, params: anytype) !std.json.Parsed(T) {
+        const image = try self.readImage(path);
+        defer self.allocator.free(image);
+        return self.uploadImageBytesAs(T, image, std.fs.path.basename(path), params);
+    }
+
+    /// Upload an in-memory image with the Image API, as `uploadImage` does
+    /// for a file. `file_name` is sent as the file name, extension included
+    /// (`"image.png"`); the content type is detected from the image bytes,
+    /// falling back to the extension.
+    ///
+    /// Caller owns the result and must call `deinit` on it.
+    pub fn uploadImageBytes(self: *Client, image: []const u8, file_name: []const u8, params: anytype) !std.json.Parsed(std.json.Value) {
+        return self.uploadImageBytesAs(std.json.Value, image, file_name, params);
+    }
+
+    /// Same as `uploadImageBytes` but decodes the payload into `T`.
+    pub fn uploadImageBytesAs(self: *Client, comptime T: type, image: []const u8, file_name: []const u8, params: anytype) !std.json.Parsed(T) {
+        try self.checkImageSize(image.len);
+
+        var content_type_buffer: [multipart_content_type_len]u8 = undefined;
+        const content_type = multipartContentType(self.threaded.io(), &content_type_buffer);
+        const boundary = content_type[multipart_prefix.len..];
+
+        var body: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body.deinit();
+        // an Allocating writer only ever fails to allocate
+        self.writeImageForm(&body.writer, boundary, image, file_name, params) catch return error.OutOfMemory;
+
+        const response = self.post("/image", content_type, body.written()) catch |err| {
+            if (err == Error.Timeout) try self.recordFixedUrl(image_url);
+            return err;
+        };
+        return self.decodeJson(T, response) catch |err| {
+            if (err != error.OutOfMemory) try self.recordFixedUrl(image_url);
+            return err;
+        };
+    }
+
     /// Default search engine as provided to the constructor, if any.
     pub fn engine(self: *const Client) ?[]const u8 {
         return self.param("engine");
@@ -472,6 +552,16 @@ pub const Client = struct {
         }
     }
 
+    /// Attach a fixed URL to the last error. For the upload, whose URL
+    /// never carries a parameter: the api_key travels in the body.
+    fn recordFixedUrl(self: *Client, url: []const u8) Allocator.Error!void {
+        if (self.last_error) |*info| {
+            const copy = try self.allocator.dupe(u8, url);
+            if (info.url) |old| self.allocator.free(old);
+            info.url = copy;
+        }
+    }
+
     /// Write one query parameter value, percent-encoding strings and
     /// stringifying integers, floats, and booleans.
     fn writeValue(w: *std.Io.Writer, value: anytype) !void {
@@ -581,18 +671,173 @@ pub const Client = struct {
         };
     }
 
+    /// Constructor defaults the Image API takes; search defaults such as
+    /// `engine` or `output` are meaningless there and are not sent.
+    const image_form_defaults = [_][]const u8{ "api_key", "source" };
+
+    /// Read the image file at `path`, checking its size before loading it.
+    /// Caller owns the result.
+    fn readImage(self: *Client, path: []const u8) ![]u8 {
+        const io = self.threaded.io();
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+
+        const size = try file.length(io);
+        try self.checkImageSize(size);
+
+        const image = try self.allocator.alloc(u8, @intCast(size));
+        errdefer self.allocator.free(image);
+        const read = try file.readPositionalAll(io, image, 0);
+        // the file shrank since `length`: hand back what is there
+        if (read < image.len) return self.allocator.realloc(image, read);
+        return image;
+    }
+
+    fn checkImageSize(self: *Client, size: u64) !void {
+        if (size <= image_max_size) return;
+        const message = try std.fmt.allocPrint(
+            self.allocator,
+            "image is too large: {d} bytes, the Image API limit is {d} bytes",
+            .{ size, image_max_size },
+        );
+        defer self.allocator.free(message);
+        try self.setLastError(message);
+        return Error.ImageTooLarge;
+    }
+
+    /// Content-Type of a multipart body, up to its boundary.
+    const multipart_prefix = "multipart/form-data; boundary=";
+    /// The boundary is "serpapi-zig-" followed by 32 random hex digits.
+    const multipart_content_type_len = multipart_prefix.len + "serpapi-zig-".len + 32;
+
+    /// Fill `buffer` with a multipart/form-data Content-Type carrying a
+    /// random boundary, `content_type[multipart_prefix.len..]`. 128 random
+    /// bits make a collision with the image bytes practically impossible.
+    fn multipartContentType(io: std.Io, buffer: *[multipart_content_type_len]u8) []const u8 {
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        return std.fmt.bufPrint(buffer, multipart_prefix ++ "serpapi-zig-{x}", .{&random}) catch unreachable;
+    }
+
+    /// Write the Image API multipart/form-data body: the call `params`,
+    /// then the `api_key` and `source` defaults they do not override, then
+    /// the image itself in the `image` field. A call parameter named
+    /// `image` would send a second `image` part, so it is a compile error.
+    fn writeImageForm(
+        self: *const Client,
+        w: *std.Io.Writer,
+        boundary: []const u8,
+        image: []const u8,
+        file_name: []const u8,
+        params: anytype,
+    ) std.Io.Writer.Error!void {
+        inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |field| {
+            if (comptime std.mem.eql(u8, field.name, "image")) {
+                @compileError("the `image` form field carries the uploaded file; it cannot be a parameter");
+            }
+            try writeFormFieldHead(w, boundary, field.name);
+            try writeFormValue(w, @field(params, field.name));
+            try w.writeAll("\r\n");
+        }
+        for (image_form_defaults) |key| {
+            if (hasParam(params, key)) continue;
+            const value = self.param(key) orelse continue;
+            try writeFormFieldHead(w, boundary, key);
+            try w.writeAll(value);
+            try w.writeAll("\r\n");
+        }
+
+        try w.print("--{s}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"", .{boundary});
+        try writeQuoted(w, file_name);
+        try w.print("\"\r\nContent-Type: {s}\r\n\r\n", .{imageMimeType(image, file_name)});
+        try w.writeAll(image);
+        try w.print("\r\n--{s}--\r\n", .{boundary});
+    }
+
+    fn writeFormFieldHead(w: *std.Io.Writer, boundary: []const u8, name: []const u8) std.Io.Writer.Error!void {
+        try w.print("--{s}\r\nContent-Disposition: form-data; name=\"", .{boundary});
+        try writeQuoted(w, name);
+        try w.writeAll("\"\r\n\r\n");
+    }
+
+    /// Write a form field value as is, stringifying integers, floats, and
+    /// booleans.
+    fn writeFormValue(w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
+        const T = @TypeOf(value);
+        if (comptime isString(T)) return w.writeAll(value);
+        switch (@typeInfo(T)) {
+            .bool => try w.writeAll(if (value) "true" else "false"),
+            .int, .comptime_int, .float, .comptime_float => try w.print("{d}", .{value}),
+            else => @compileError("unsupported parameter type: " ++ @typeName(T)),
+        }
+    }
+
+    /// Write a Content-Disposition name or filename, escaping the characters
+    /// that would end the quoted string or the header line, the way browsers
+    /// do (WHATWG HTML, multipart/form-data encoding).
+    fn writeQuoted(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+        for (text) |c| switch (c) {
+            '"' => try w.writeAll("%22"),
+            '\r' => try w.writeAll("%0D"),
+            '\n' => try w.writeAll("%0A"),
+            else => try w.writeByte(c),
+        };
+    }
+
+    /// Guess the image content type from its signature, falling back to the
+    /// file extension. The Image API supports jpg, jpeg, png and webp.
+    fn imageMimeType(image: []const u8, file_name: []const u8) []const u8 {
+        if (std.mem.startsWith(u8, image, "\xFF\xD8\xFF")) return "image/jpeg";
+        if (std.mem.startsWith(u8, image, "\x89PNG\r\n\x1a\n")) return "image/png";
+        if (image.len >= 12 and std.mem.startsWith(u8, image, "RIFF") and std.mem.eql(u8, image[8..12], "WEBP")) {
+            return "image/webp";
+        }
+        const extension = std.fs.path.extension(file_name);
+        const types = [_]struct { []const u8, []const u8 }{
+            .{ ".jpg", "image/jpeg" },
+            .{ ".jpeg", "image/jpeg" },
+            .{ ".png", "image/png" },
+            .{ ".webp", "image/webp" },
+        };
+        for (types) |entry| {
+            if (std.ascii.eqlIgnoreCase(extension, entry[0])) return entry[1];
+        }
+        return "application/octet-stream";
+    }
+
     const Response = struct { body: []u8, status: std.http.Status };
+
+    /// One HTTP request to the backend: a GET, or a POST when `body` is set.
+    const Outgoing = struct {
+        url: []const u8,
+        body: ?Body = null,
+
+        const Body = struct { content_type: []const u8, bytes: []const u8 };
+    };
 
     /// Perform an HTTP GET request against the backend and return the raw
     /// body (caller owns) along with the HTTP status.
     fn get(self: *Client, endpoint: []const u8, params: anytype, extra: []const Param) !Response {
         const url = try self.buildUrl(self.allocator, endpoint, params, extra);
         defer self.allocator.free(url);
+        return self.send(.{ .url = url });
+    }
 
+    /// Perform an HTTP POST request against the backend. Nothing goes in the
+    /// URL: every parameter, `api_key` included, travels in the body.
+    fn post(self: *Client, endpoint: []const u8, content_type: []const u8, body: []const u8) !Response {
+        const url = try std.fmt.allocPrint(self.allocator, "https://{s}{s}", .{ backend, endpoint });
+        defer self.allocator.free(url);
+        return self.send(.{ .url = url, .body = .{ .content_type = content_type, .bytes = body } });
+    }
+
+    /// Send `request` under the client's timeout and return the raw body
+    /// (caller owns) along with the HTTP status.
+    fn send(self: *Client, request: Outgoing) !Response {
         var body: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body.deinit();
 
-        const status = try self.fetch(url, &body.writer);
+        const status = try self.fetch(request, &body.writer);
         return .{ .body = try body.toOwnedSlice(), .status = status };
     }
 
@@ -602,15 +847,16 @@ pub const Client = struct {
         timer: std.Io.Cancelable!void,
     };
 
-    /// Issue the GET request, writing the body to `w`. When `timeout` is
-    /// non-zero the request runs on its own thread and is canceled once the
-    /// timer fires, so a stalled connection cannot block the caller forever.
+    /// Issue the request, writing the response body to `w`. When `timeout`
+    /// is non-zero the request runs on its own thread and is canceled once
+    /// the timer fires, so a stalled connection cannot block the caller
+    /// forever.
     ///
     /// Every request goes through here, so this is where the previous
     /// call's failure is forgotten: `lastError()` describes this call only.
-    fn fetch(self: *Client, url: []const u8, w: *std.Io.Writer) !std.http.Status {
+    fn fetch(self: *Client, request: Outgoing, w: *std.Io.Writer) !std.http.Status {
         self.clearLastError();
-        if (self.timeout == 0) return fetchStatus(&self.http, url, w, self.persistent);
+        if (self.timeout == 0) return fetchStatus(&self.http, request, w, self.persistent);
 
         const io = self.threaded.io();
         var buffer: [2]Race = undefined;
@@ -628,10 +874,10 @@ pub const Client = struct {
         // be interrupted. Without concurrency (single-threaded builds),
         // fall back to an unbounded request rather than fail.
         race.concurrent(.timer, std.Io.Timeout.sleep, .{ deadline, io }) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => return fetchStatus(&self.http, url, w, self.persistent),
+            error.ConcurrencyUnavailable => return fetchStatus(&self.http, request, w, self.persistent),
         };
-        race.concurrent(.request, fetchStatus, .{ &self.http, url, w, self.persistent }) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => return fetchStatus(&self.http, url, w, self.persistent),
+        race.concurrent(.request, fetchStatus, .{ &self.http, request, w, self.persistent }) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => return fetchStatus(&self.http, request, w, self.persistent),
         };
 
         switch (try race.await()) {
@@ -649,7 +895,8 @@ pub const Client = struct {
     /// plus body decoding failures surfaced while draining the framing.
     const FetchError = std.http.Client.FetchError || std.http.Reader.BodyError || Allocator.Error;
 
-    /// GET `url` and stream the decoded body to `w`, returning the status.
+    /// Send `request` and stream the decoded response body to `w`, returning
+    /// the status.
     ///
     /// This mirrors `std.http.Client.fetch`, with one addition. When the
     /// body is compressed *and* chunked (serpapi.com's default), the
@@ -659,16 +906,28 @@ pub const Client = struct {
     /// silently a no-op and every request paid for a new TLS handshake.
     /// Draining the framing marks the body complete and lets the connection
     /// return to the pool. Measured: ~4x faster on repeated searches.
-    fn fetchStatus(http: *std.http.Client, url: []const u8, w: *std.Io.Writer, keep_alive: bool) FetchError!std.http.Status {
-        const uri = try std.Uri.parse(url);
+    fn fetchStatus(http: *std.http.Client, request: Outgoing, w: *std.Io.Writer, keep_alive: bool) FetchError!std.http.Status {
+        const uri = try std.Uri.parse(request.url);
 
-        var req = try http.request(.GET, uri, .{
-            // follow up to 3 redirects, as std.http.Client.fetch does
-            .redirect_behavior = @enumFromInt(3),
+        var req = try http.request(if (request.body == null) .GET else .POST, uri, .{
+            // Follow up to 3 redirects for a GET, as std.http.Client.fetch
+            // does. A POST is not repeatable: a redirect comes back as its
+            // non-200 status rather than being replayed as a GET.
+            .redirect_behavior = if (request.body == null) @enumFromInt(3) else .unhandled,
             .keep_alive = keep_alive,
+            .headers = .{ .content_type = if (request.body) |body| .{ .override = body.content_type } else .default },
         });
         defer req.deinit();
-        try req.sendBodiless();
+
+        if (request.body) |body| {
+            req.transfer_encoding = .{ .content_length = body.bytes.len };
+            var body_writer = try req.sendBodyUnflushed(&.{});
+            try body_writer.writer.writeAll(body.bytes);
+            try body_writer.end();
+            try req.connection.?.flush();
+        } else {
+            try req.sendBodiless();
+        }
 
         var redirect_buffer: [8 * 1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buffer);
@@ -713,6 +972,23 @@ pub const Client = struct {
         }) catch {
             try self.fail(.{ .message = response.body, .status = response.status });
             try self.recordUrl(endpoint, params, extra);
+            return Error.JsonParseError;
+        };
+        return parsed;
+    }
+
+    /// Check `response` and decode its JSON body into `T`, consuming the body.
+    /// Used by the upload, whose failures carry the fixed `/image` URL.
+    fn decodeJson(self: *Client, comptime T: type, response: Response) !std.json.Parsed(T) {
+        defer self.allocator.free(response.body);
+
+        try self.checkResponse(response.body, response.status);
+
+        const parsed = std.json.parseFromSlice(T, self.allocator, response.body, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch {
+            try self.fail(.{ .message = response.body, .status = response.status });
             return Error.JsonParseError;
         };
         return parsed;
@@ -1085,7 +1361,7 @@ test "fetch gives up after the timeout" {
     defer body.deinit();
 
     const started = std.Io.Clock.now(.awake, io);
-    try testing.expectError(Error.Timeout, client.fetch(url, &body.writer));
+    try testing.expectError(Error.Timeout, client.fetch(.{ .url = url }, &body.writer));
     const elapsed_ns = std.Io.Clock.now(.awake, io).nanoseconds - started.nanoseconds;
 
     try testing.expectEqualStrings("request timed out after 2s", client.errorMessage().?);
@@ -1134,7 +1410,7 @@ test "fetch returns before the timeout when the server answers" {
     var body: std.Io.Writer.Allocating = .init(testing.allocator);
     defer body.deinit();
 
-    const status = try client.fetch(url, &body.writer);
+    const status = try client.fetch(.{ .url = url }, &body.writer);
     try testing.expectEqual(std.http.Status.ok, status);
     try testing.expectEqualStrings("{\"ok\":true}\n", body.written());
     try answer.await(io);
@@ -1194,7 +1470,7 @@ test "persistent connection is reused after a chunked gzip response" {
     for (0..2) |_| {
         var body: std.Io.Writer.Allocating = .init(testing.allocator);
         defer body.deinit();
-        try testing.expectEqual(std.http.Status.ok, try client.fetch(url, &body.writer));
+        try testing.expectEqual(std.http.Status.ok, try client.fetch(.{ .url = url }, &body.writer));
         try testing.expectEqualStrings("{\"ok\":true}", body.written());
         try testing.expectEqual(@as(usize, 1), client.http.connection_pool.free_len);
     }
@@ -1379,7 +1655,7 @@ test "lastError only describes the most recent request" {
     // ...and forgotten as soon as the next request starts
     var body: std.Io.Writer.Allocating = .init(testing.allocator);
     defer body.deinit();
-    try testing.expectEqual(std.http.Status.ok, try client.fetch(url, &body.writer));
+    try testing.expectEqual(std.http.Status.ok, try client.fetch(.{ .url = url }, &body.writer));
     try answer.await(io);
     try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
     try testing.expectEqual(@as(?[]const u8, null), client.errorMessage());
@@ -1389,6 +1665,248 @@ test "lastError only describes the most recent request" {
     server.deinit(io); // nobody listens on the port any more
     listening = false;
     body.clearRetainingCapacity();
-    try testing.expectError(error.ConnectionRefused, client.fetch(url, &body.writer));
+    try testing.expectError(error.ConnectionRefused, client.fetch(.{ .url = url }, &body.writer));
     try testing.expectEqual(@as(?ErrorInfo, null), client.lastError());
+}
+
+/// Smallest valid PNG: a 1x1 transparent pixel.
+const png_1x1 = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89" ++
+    "\x00\x00\x00\x0aIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\x0d\x0a\x2d\xb4\x00\x00\x00\x00IEND\xaeB\x60\x82";
+
+test "imageMimeType sniffs the signature before the extension" {
+    try testing.expectEqualStrings("image/png", Client.imageMimeType(png_1x1, "photo.jpg"));
+    try testing.expectEqualStrings("image/jpeg", Client.imageMimeType("\xFF\xD8\xFF\xE0rest", "image"));
+    try testing.expectEqualStrings("image/webp", Client.imageMimeType("RIFF\x00\x00\x00\x00WEBPVP8 ", "image.png"));
+    // a RIFF container that is not WebP, and a truncated one
+    try testing.expectEqualStrings("application/octet-stream", Client.imageMimeType("RIFF\x00\x00\x00\x00WAVE", "sound"));
+    try testing.expectEqualStrings("application/octet-stream", Client.imageMimeType("RIFF", "image"));
+
+    // unknown signature: fall back to the extension, whatever its case
+    try testing.expectEqualStrings("image/jpeg", Client.imageMimeType("data", "a.jpg"));
+    try testing.expectEqualStrings("image/jpeg", Client.imageMimeType("data", "a.JPEG"));
+    try testing.expectEqualStrings("image/png", Client.imageMimeType("data", "dir.d/a.Png"));
+    try testing.expectEqualStrings("image/webp", Client.imageMimeType("data", "a.webp"));
+    try testing.expectEqualStrings("application/octet-stream", Client.imageMimeType("data", "a.gif"));
+    try testing.expectEqualStrings("application/octet-stream", Client.imageMimeType("data", "image"));
+    try testing.expectEqualStrings("application/octet-stream", Client.imageMimeType("", ""));
+}
+
+test "multipartContentType carries a random boundary" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    var first_buffer: [Client.multipart_content_type_len]u8 = undefined;
+    var second_buffer: [Client.multipart_content_type_len]u8 = undefined;
+    const first = Client.multipartContentType(io, &first_buffer);
+    const second = Client.multipartContentType(io, &second_buffer);
+
+    try testing.expectEqual(Client.multipart_content_type_len, first.len);
+    try testing.expect(std.mem.startsWith(u8, first, "multipart/form-data; boundary=serpapi-zig-"));
+    for (first["multipart/form-data; boundary=serpapi-zig-".len..]) |c| try testing.expect(std.ascii.isHex(c));
+    try testing.expect(!std.mem.eql(u8, first, second));
+}
+
+test "writeImageForm sends the image and api_key in the body, not search defaults" {
+    var client = try Client.init(testing.allocator, .{
+        .api_key = "secret",
+        .engine = "google_lens",
+        .output = "html",
+    });
+    defer client.deinit();
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try client.writeImageForm(&body.writer, "BOUNDARY", png_1x1, "image.png", .{});
+
+    try testing.expectEqualStrings(
+        "--BOUNDARY\r\nContent-Disposition: form-data; name=\"api_key\"\r\n\r\nsecret\r\n" ++
+            "--BOUNDARY\r\nContent-Disposition: form-data; name=\"source\"\r\n\r\nserpapi-zig:" ++ version ++ "\r\n" ++
+            "--BOUNDARY\r\nContent-Disposition: form-data; name=\"image\"; filename=\"image.png\"\r\n" ++
+            "Content-Type: image/png\r\n\r\n" ++ png_1x1 ++ "\r\n--BOUNDARY--\r\n",
+        body.written(),
+    );
+}
+
+test "writeImageForm call parameters override the constructor key" {
+    var client = try Client.init(testing.allocator, .{ .api_key = "default" });
+    defer client.deinit();
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try client.writeImageForm(&body.writer, "B", "data", "na\"me\r\n.jpg", .{ .api_key = "override", .retries = 2 });
+
+    try testing.expectEqualStrings(
+        "--B\r\nContent-Disposition: form-data; name=\"api_key\"\r\n\r\noverride\r\n" ++
+            "--B\r\nContent-Disposition: form-data; name=\"retries\"\r\n\r\n2\r\n" ++
+            "--B\r\nContent-Disposition: form-data; name=\"source\"\r\n\r\nserpapi-zig:" ++ version ++ "\r\n" ++
+            // quotes and line breaks cannot break out of the header
+            "--B\r\nContent-Disposition: form-data; name=\"image\"; filename=\"na%22me%0D%0A.jpg\"\r\n" ++
+            "Content-Type: image/jpeg\r\n\r\ndata\r\n--B--\r\n",
+        body.written(),
+    );
+    try testing.expect(std.mem.indexOf(u8, body.written(), "default") == null);
+}
+
+test "uploadImageBytes rejects an image over the size limit before sending it" {
+    // no api_key and no network: the size check fails first
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const image = try testing.allocator.alloc(u8, image_max_size + 1);
+    defer testing.allocator.free(image);
+    @memset(image, 0);
+
+    try testing.expectError(Error.ImageTooLarge, client.uploadImageBytes(image, "image.png", .{}));
+    try testing.expectEqualStrings(
+        "image is too large: 512001 bytes, the Image API limit is 512000 bytes",
+        client.errorMessage().?,
+    );
+}
+
+test "uploadImage checks the file size before reading it" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "large.png", .{});
+    // a sparse file: the size is there, the bytes never are
+    try file.setLength(io, 501 * 1024);
+    file.close(io);
+
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/large.png", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+    try testing.expectError(Error.ImageTooLarge, client.uploadImage(path, .{}));
+    try testing.expect(std.mem.startsWith(u8, client.errorMessage().?, "image is too large: 513024 bytes"));
+}
+
+test "uploadImage reports a missing file" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectError(error.FileNotFound, client.uploadImage("does/not/exist.png", .{}));
+}
+
+test "readImage loads the whole file" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "pixel.png", .data = png_1x1 });
+
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/pixel.png", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+    const image = try client.readImage(path);
+    defer testing.allocator.free(image);
+    try testing.expectEqualSlices(u8, png_1x1, image);
+}
+
+test "fetch sends a POST body with its content type" {
+    var client = try Client.init(testing.allocator, .{ .timeout = 30 });
+    defer client.deinit();
+    const io = client.threaded.io();
+
+    const loopback: std.Io.net.IpAddress = try .parseIp4("127.0.0.1", 0);
+    var server = try loopback.listen(io, .{});
+    defer server.deinit(io);
+
+    const Capture = struct {
+        request_line: [64]u8 = undefined,
+        request_line_len: usize = 0,
+        content_type: [64]u8 = undefined,
+        content_type_len: usize = 0,
+        body: [64]u8 = undefined,
+        body_len: usize = 0,
+
+        fn serve(capture: *@This(), server_ptr: *std.Io.net.Server, server_io: std.Io) !void {
+            var stream = try server_ptr.accept(server_io);
+            defer stream.close(server_io);
+            var read_buffer: [4096]u8 = undefined;
+            var reader = stream.reader(server_io, &read_buffer);
+
+            const request_line = std.mem.trimEnd(u8, try reader.interface.takeDelimiterInclusive('\n'), "\r\n");
+            @memcpy(capture.request_line[0..request_line.len], request_line);
+            capture.request_line_len = request_line.len;
+            var content_length: usize = 0;
+            while (true) {
+                const line = std.mem.trimEnd(u8, try reader.interface.takeDelimiterInclusive('\n'), "\r\n");
+                if (line.len == 0) break;
+                const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+                const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+                if (std.ascii.eqlIgnoreCase(line[0..colon], "content-type")) {
+                    @memcpy(capture.content_type[0..value.len], value);
+                    capture.content_type_len = value.len;
+                } else if (std.ascii.eqlIgnoreCase(line[0..colon], "content-length")) {
+                    content_length = try std.fmt.parseInt(usize, value, 10);
+                }
+            }
+            try reader.interface.readSliceAll(capture.body[0..content_length]);
+            capture.body_len = content_length;
+
+            var write_buffer: [256]u8 = undefined;
+            var writer = stream.writer(server_io, &write_buffer);
+            try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"image_id\":\"abc\"}");
+            try writer.interface.flush();
+        }
+    };
+    var capture: Capture = .{};
+    var served = try io.concurrent(Capture.serve, .{ &capture, &server, io });
+    defer _ = served.cancel(io) catch {};
+
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/image", .{server.socket.address.getPort()});
+    defer testing.allocator.free(url);
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    const status = try client.fetch(.{
+        .url = url,
+        .body = .{ .content_type = "multipart/form-data; boundary=B", .bytes = "--B\r\nfield\r\n--B--\r\n" },
+    }, &body.writer);
+    try served.await(io);
+
+    try testing.expectEqual(std.http.Status.ok, status);
+    try testing.expectEqualStrings("{\"image_id\":\"abc\"}", body.written());
+    try testing.expectEqualStrings("POST /image HTTP/1.1", capture.request_line[0..capture.request_line_len]);
+    try testing.expectEqualStrings("multipart/form-data; boundary=B", capture.content_type[0..capture.content_type_len]);
+    try testing.expectEqualStrings("--B\r\nfield\r\n--B--\r\n", capture.body[0..capture.body_len]);
+}
+
+test "decodeJson reports a rejected upload" {
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const rejected = try testing.allocator.dupe(u8, "{\"error\":\"Invalid image format. Supported format: jpg, jpeg, png, webp\"}");
+    try testing.expectError(Error.SerpApiError, client.decodeJson(std.json.Value, .{ .body = rejected, .status = .bad_request }));
+    try testing.expectEqualStrings("Invalid image format. Supported format: jpg, jpeg, png, webp", client.errorMessage().?);
+
+    const accepted = try testing.allocator.dupe(u8, "{\"message\":\"Image uploaded successfully.\",\"image_id\":\"abc\"}");
+    var upload = try client.decodeJson(struct { image_id: []const u8 }, .{ .body = accepted, .status = .ok });
+    defer upload.deinit();
+    try testing.expectEqualStrings("abc", upload.value.image_id);
+}
+
+test "image upload helpers clean up on allocation failure" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pixel.png", .data = png_1x1 });
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/pixel.png", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: Allocator, image_path: []const u8) !void {
+            var client = try Client.init(allocator, .{ .api_key = "secret" });
+            defer client.deinit();
+
+            const image = try client.readImage(image_path);
+            defer allocator.free(image);
+
+            var body: std.Io.Writer.Allocating = .init(allocator);
+            defer body.deinit();
+            client.writeImageForm(&body.writer, "B", image, "pixel.png", .{}) catch return error.OutOfMemory;
+        }
+    }.run, .{path});
 }
