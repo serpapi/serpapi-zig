@@ -14,6 +14,9 @@
   and refuses to start unless it runs from `master` with `SERPAPI_KEY` set
   and an empty `git status --porcelain` (the previous `git diff --quiet`
   missed staged and untracked files)
+- CI: the coverage job runs on Linux arm64 (Debian trixie container) instead
+  of macOS, where kcov hung the unit-test binary until the step timed out on
+  every run. It is no longer advisory, and fails below 90% line coverage
 
 ### Behavior changes
 

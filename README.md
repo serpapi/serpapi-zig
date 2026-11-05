@@ -457,11 +457,13 @@ zig build cov
 open zig-out/coverage/merged/kcov-merged/index.html
 ```
 
-Current state: **90.4% of lines covered** (225 of 249 in `src/client.zig`)
-without an API key, since the tests covering `html`, `md`, `searchArchive`, and
-`account` skip themselves rather than fail. With `SERPAPI_KEY` set — as in
-CI, which publishes the figure to every job summary — those paths execute
-too and coverage rises accordingly.
+Current state: **94.01% of lines covered** (596 of 634) without an API key,
+since the tests covering `html`, `md`, `searchArchive`, and `account` skip
+themselves rather than fail. With `SERPAPI_KEY` set — as in CI, which
+publishes the figure to every job summary and fails below 90% — those paths
+execute too and coverage rises accordingly. CI measures on Linux arm64 in a
+Debian trixie container; kcov needs `--security-opt seccomp=unconfined` to
+run inside Docker.
 
 The lines that remain uncovered either way are `errdefer` branches that only
 execute if the operating system refuses an allocation midway through a

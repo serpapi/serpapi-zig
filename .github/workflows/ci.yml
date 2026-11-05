@@ -37,50 +37,57 @@ jobs:
           zig build --build-file demo/flight_tracker/build.zig
           zig build test --build-file demo/wasm/build.zig --summary all
 
-  # Runs on macOS: kcov reads the unit-test binary's debug info there,
-  # while on Linux it reports zero instrumented files for that binary
-  # (the integration binary works on both).
-  #
-  # Advisory only: kcov has been observed to hang the unit-test binary under
-  # ptrace on macOS, so the job is time-boxed and does not fail the workflow.
+  # Runs on Linux arm64 inside Debian trixie, which packages kcov 43:
+  # - macOS: kcov hung the unit-test binary under ptrace on the hosted
+  #   runner until the step timed out, on every run.
+  # - Linux x86_64: kcov reports zero instrumented files for Zig's Debug
+  #   binaries.
+  # - Ubuntu 24.04: no kcov package.
+  # kcov disables ASLR with personality(2), which Docker's default seccomp
+  # profile rejects (kcov exits 255), hence seccomp=unconfined.
   coverage:
-    runs-on: macos-latest
-    # A generous backstop for the whole job (checkout/setup/brew), well
-    # above the coverage step's own 15m cap so that cap is what normally
-    # fires. A job-level timeout cancels the job, which continue-on-error
-    # cannot suppress, so it must not be the common case.
-    timeout-minutes: 30
-    continue-on-error: true
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:trixie
+      options: --security-opt seccomp=unconfined
+    timeout-minutes: 15
     steps:
+      - name: Install kcov
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            kcov python3 git ca-certificates curl xz-utils zstd
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Install kcov
-        run: brew install kcov
 
       - name: Code coverage
-        timeout-minutes: 15
+        timeout-minutes: 10
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: |
-          zig build cov
-          for f in $(find zig-out/coverage -maxdepth 3 -name coverage.json); do
-            echo "$f: $(head -c 300 $f | tr -d '\n')"
-          done
-          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          import json
+          zig build cov --summary all
+          python3 - <<'EOF'
+          import json, os, sys
+          minimum = 90.0  # REVIEW Q6
           report = json.load(open("zig-out/coverage/merged/kcov-merged/coverage.json"))
-          print("## Code coverage: %s%%\n" % report["percent_covered"])
-          print("| file | covered | total | percent |")
-          print("|---|---|---|---|")
+          total = float(report["percent_covered"])
+          lines = ["## Code coverage: %.2f%% (minimum %.0f%%)\n" % (total, minimum),
+                   "| file | covered | total | percent |", "|---|---|---|---|"]
           for f in report["files"]:
-              print("| %s | %s | %s | %s%% |" % (
+              lines.append("| %s | %s | %s | %s%% |" % (
                   f["file"].split("/")[-1], f["covered_lines"],
                   f["total_lines"], f["percent_covered"]))
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("\n".join(lines) + "\n")
+          if not report["files"] or total < minimum:
+              sys.exit("coverage %.2f%% is below %.0f%%" % (total, minimum))
           EOF
 
       - name: Upload HTML report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage
