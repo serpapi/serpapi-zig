@@ -2,10 +2,6 @@
 
 [![serpapi-zig](https://github.com/serpapi/serpapi-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/serpapi/serpapi-zig/actions/workflows/ci.yml)
 
-> [!WARNING]
-> This library is under heavy development and is **not production ready**.
-> The API may change without notice between releases.
-
 Integrate search data into your AI workflow, RAG / fine-tuning, or Zig application using this wrapper for [SerpApi](https://serpapi.com).
 
 SerpApi supports Google, Google Maps, Google Shopping, Baidu, Yandex, Yahoo, eBay, App Stores, and [more](https://serpapi.com).
